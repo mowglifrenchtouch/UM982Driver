@@ -28,16 +28,57 @@ Arguments principaux:
 - `--save-config`
 - `--apply-profile-config`
 - `--apply-profile-logs`
+- `--discover-log-syntax`
 - `--enable-raw`
 - `--raw-output capture.bin`
 - `--text-output capture.log`
 - `--summary summary.json`
 
+## Compatibilite De Syntaxe LOG
+
+Certains firmwares UM98x acceptent bien `LOG <msg> ONTIME <period>` pour
+des logs comme `GPGGA` ou `PVTSLNA`, mais utilisent une syntaxe N4
+specifique pour d'autres messages:
+- `BESTNAVA/BESTNAVB <period>`
+- `RTKSTATUSA/RTKSTATUSB <period>`
+- `RTCMSTATUSA/RTCMSTATUSB ONCHANGED`
+- `GPHPR <period>` avec une sortie qui peut etre `$GNHPR`
+- `GPHPR2 ONCHANGED` avec une sortie qui peut etre `$GNHPR2`
+
+Le validateur embarque une table de syntaxe par message:
+- `nmea_log_ontime`
+- `unicore_direct_period`
+- `unicore_onchanged`
+- `special_output_name`
+
+Puis il essaye automatiquement des variantes de secours tant qu'il voit
+des reponses du type `PARSING FAILED` ou `GRAMMAR ERROR`.
+
+La premiere syntaxe qui n'est plus rejetee est memorisee dans le resume:
+- `accepted_log_commands`
+- `rejected_log_commands`
+- `log_command_syntax_by_message`
+
+Pour tester rapidement uniquement la grammaire des logs sans lancer une
+capture longue:
+
+```bash
+python3 tools/um982_live_validate.py \
+  --port /dev/ttyUSB0 \
+  --baud 921600 \
+  --profile debug \
+  --format ascii \
+  --apply-profile-logs \
+  --discover-log-syntax \
+  --duration 0 \
+  --summary /tmp/um982-log-syntax.json
+```
+
 ## Profils
 
 | Profil | But | Format recommande | Logs principaux |
 | --- | --- | --- | --- |
-| `normal` | validation legere / Nav2 | `ascii` | `GPGGA`, `PVTSLNA/B`, `BESTNAVA/B`, `RTKSTATUSA/B`, `RTCMSTATUSA/B` |
+| `normal` | validation legere / Nav2 | `ascii` | `GPGGA`, `PVTSLNA/B`, `BESTNAVA/B`, `GPHPR`, `RTKSTATUSA/B`, `RTCMSTATUSA/B` |
 | `debug` | diagnostics terrain complets | `ascii` ou `hybrid` | `normal` + `BESTSATA/B`, `SATSINFOA/B`, `AGCA/B`, `HWSTATUSA/B`, `JAMSTATUSA/B`, `FREQJAMSTATUSA/B` |
 | `survey` | analyse GNSS avancee | `hybrid` | `debug` avec frequences plus lentes, `OBSVMCMPA/B` optionnel |
 | `high_precision` | essais avances / tuning | `hybrid` ou `binary` | `debug` + `CONFIG PVTALG MULTI`, `RTCMDECAUTO`, `RTCMPHASERATE`, `RTCMCLOCKOFFSET` |
@@ -135,6 +176,7 @@ Quand `--apply-profile-config` est demande, l'outil applique une base rover UM98
 Le resume console et JSON contient:
 - le baud demande, detecte et reel de capture
 - les reponses commandes `ok|unsupported|no_response`
+- les syntaxes LOG acceptees/rejetees par message
 - les compteurs NMEA / ASCII / binary
 - les logs attendus et leur frequence observee
 - la presence du fix

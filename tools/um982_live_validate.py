@@ -32,6 +32,7 @@ KNOWN_UNICORE_ASCII_TYPES = {
     "VERSIONA",
 }
 KNOWN_NMEA_SUFFIXES = {"GGA", "GSV", "HDT", "HPR"}
+KNOWN_NMEA_TYPES = {"GNHPR2", "GPHPR2"}
 KNOWN_BINARY_IDS = {
     138: "OBSVMCMPB",
     218: "HWSTATUSB",
@@ -75,11 +76,70 @@ UNSUPPORTED_RESPONSE_HINTS = (
     "unknown command",
     "invalid command",
     "command error",
+    "parsing failed",
+    "grammar error",
     "syntax error",
     "failed",
     "denied",
 )
 POSITIVE_RESPONSE_HINTS = ("ok", "ack", "accepted", "success")
+
+LOG_SYNTAX_NMEA_ONTIME = "nmea_log_ontime"
+LOG_SYNTAX_UNICORE_DIRECT_PERIOD = "unicore_direct_period"
+LOG_SYNTAX_UNICORE_ONCHANGED = "unicore_onchanged"
+
+
+@dataclass(frozen=True)
+class LogCommandSpec:
+    syntax_kind: str
+    output_names: Tuple[str, ...]
+    track_in_summary: bool = True
+
+
+LOG_COMMAND_SPECS = {
+    "GPGGA": LogCommandSpec(LOG_SYNTAX_NMEA_ONTIME, ("GPGGA",)),
+    "PVTSLNA": LogCommandSpec(LOG_SYNTAX_NMEA_ONTIME, ("PVTSLNA",)),
+    "PVTSLNB": LogCommandSpec(LOG_SYNTAX_NMEA_ONTIME, ("PVTSLNB",)),
+    "BESTNAVA": LogCommandSpec(LOG_SYNTAX_UNICORE_DIRECT_PERIOD, ("BESTNAVA",)),
+    "BESTNAVB": LogCommandSpec(LOG_SYNTAX_UNICORE_DIRECT_PERIOD, ("BESTNAVB",)),
+    "RTKSTATUSA": LogCommandSpec(LOG_SYNTAX_UNICORE_DIRECT_PERIOD, ("RTKSTATUSA",)),
+    "RTKSTATUSB": LogCommandSpec(LOG_SYNTAX_UNICORE_DIRECT_PERIOD, ("RTKSTATUSB",)),
+    "RTCMSTATUSA": LogCommandSpec(LOG_SYNTAX_UNICORE_ONCHANGED, ("RTCMSTATUSA",), track_in_summary=False),
+    "RTCMSTATUSB": LogCommandSpec(LOG_SYNTAX_UNICORE_ONCHANGED, ("RTCMSTATUSB",), track_in_summary=False),
+    "GPHPR": LogCommandSpec(LOG_SYNTAX_UNICORE_DIRECT_PERIOD, ("GNHPR", "GPHPR")),
+    "GPHPR2": LogCommandSpec(LOG_SYNTAX_UNICORE_ONCHANGED, ("GNHPR2", "GPHPR2"), track_in_summary=False),
+}
+PLANNED_LOG_MESSAGES = {
+    "GPGGA",
+    "PVTSLNA",
+    "PVTSLNB",
+    "BESTNAVA",
+    "BESTNAVB",
+    "GPHPR",
+    "GPHPR2",
+    "RTKSTATUSA",
+    "RTKSTATUSB",
+    "RTCMSTATUSA",
+    "RTCMSTATUSB",
+    "BESTSATA",
+    "BESTSATB",
+    "SATSINFOA",
+    "SATSINFOB",
+    "GPGSV",
+    "GLGSV",
+    "GAGSV",
+    "GBGSV",
+    "AGCA",
+    "AGCB",
+    "HWSTATUSA",
+    "HWSTATUSB",
+    "JAMSTATUSA",
+    "JAMSTATUSB",
+    "FREQJAMSTATUSA",
+    "FREQJAMSTATUSB",
+    "OBSVMCMPA",
+    "OBSVMCMPB",
+}
 
 
 def crc32_unicore(text: bytes) -> int:
@@ -315,6 +375,10 @@ def clamp_min_period(value: float, minimum: float) -> float:
     return value if value >= minimum else minimum
 
 
+def period_to_rate(period: float) -> float:
+    return 0.0 if period <= 0 else 1.0 / period
+
+
 def default_period(profile: str, kind: str) -> float:
     return PROFILE_PERIOD_DEFAULTS[normalize_profile(profile)][kind]
 
@@ -330,6 +394,87 @@ def signalgroup_command_for_model(model: Optional[str]) -> Optional[str]:
         # Driver-side assumption for the NebulasIV UM981/UM982 family.
         return "CONFIG SIGNALGROUP 3 6"
     return None
+
+
+def log_command_spec_for_message(message: str) -> LogCommandSpec:
+    return LOG_COMMAND_SPECS.get(message, LogCommandSpec(LOG_SYNTAX_NMEA_ONTIME, (message,)))
+
+
+def build_planned_log_command(message: str, period: Optional[float] = None) -> str:
+    spec = log_command_spec_for_message(message)
+    if spec.syntax_kind == LOG_SYNTAX_UNICORE_ONCHANGED:
+        return f"{message} ONCHANGED"
+    if period is None:
+        raise ValueError(f"period is required for {message}")
+    if spec.syntax_kind == LOG_SYNTAX_UNICORE_DIRECT_PERIOD:
+        return f"{message} {period:g}"
+    return f"LOG {message} ONTIME {period:g}"
+
+
+def parse_planned_log_command(command: str) -> Optional[Tuple[str, str, Optional[float]]]:
+    parts = command.split()
+    if len(parts) >= 4 and parts[0] == "LOG" and parts[2] == "ONTIME":
+        if parts[1] not in PLANNED_LOG_MESSAGES:
+            return None
+        try:
+            period = float(parts[3])
+        except ValueError:
+            return None
+        return parts[1], LOG_SYNTAX_NMEA_ONTIME, period
+    if len(parts) == 2 and parts[1].upper() == "ONCHANGED":
+        if parts[0] not in PLANNED_LOG_MESSAGES:
+            return None
+        return parts[0], LOG_SYNTAX_UNICORE_ONCHANGED, None
+    if len(parts) == 2:
+        if parts[0] not in PLANNED_LOG_MESSAGES:
+            return None
+        try:
+            period = float(parts[1])
+        except ValueError:
+            return None
+        return parts[0], LOG_SYNTAX_UNICORE_DIRECT_PERIOD, period
+    return None
+
+
+def build_log_command_variants(
+    message: str,
+    period: Optional[float],
+    com_port: str,
+    syntax_kind: Optional[str] = None,
+) -> List[Tuple[str, str]]:
+    variants: List[Tuple[str, str]] = []
+    syntax = syntax_kind or log_command_spec_for_message(message).syntax_kind
+    rate = period_to_rate(period or 0.0)
+
+    if syntax == LOG_SYNTAX_UNICORE_ONCHANGED:
+        variants.append((LOG_SYNTAX_UNICORE_ONCHANGED, f"{message} ONCHANGED"))
+        variants.append(("com_onchanged", f"{message} {com_port} ONCHANGED"))
+    elif syntax == LOG_SYNTAX_UNICORE_DIRECT_PERIOD:
+        if period is None:
+            raise ValueError(f"period is required for {message}")
+        variants.append((LOG_SYNTAX_UNICORE_DIRECT_PERIOD, f"{message} {period:g}"))
+        variants.append(("bare_ontime", f"{message} ONTIME {period:g}"))
+        variants.append(("com_period", f"{message} {com_port} {period:g}"))
+        if rate > 0:
+            variants.append(("com_rate", f"{message} {com_port} {rate:g}"))
+        variants.append((LOG_SYNTAX_NMEA_ONTIME, f"LOG {message} ONTIME {period:g}"))
+    else:
+        if period is None:
+            raise ValueError(f"period is required for {message}")
+        variants.append((LOG_SYNTAX_NMEA_ONTIME, f"LOG {message} ONTIME {period:g}"))
+        variants.append(("bare_ontime", f"{message} ONTIME {period:g}"))
+        variants.append(("bare_period", f"{message} {period:g}"))
+        variants.append(("com_period", f"{message} {com_port} {period:g}"))
+        if rate > 0:
+            variants.append(("com_rate", f"{message} {com_port} {rate:g}"))
+    deduped: List[Tuple[str, str]] = []
+    seen = set()
+    for label, command in variants:
+        if command in seen:
+            continue
+        seen.add(command)
+        deduped.append((label, command))
+    return deduped
 
 
 def unique_ints(values: Iterable[int]) -> List[int]:
@@ -580,7 +725,14 @@ class BinaryFrame:
 class ProfilePlan:
     log_commands: List[str]
     profile_commands: List[str]
-    expected_messages: Dict[str, float]
+    expected_messages: Dict[str, "ExpectedMessagePlan"]
+
+
+@dataclass
+class ExpectedMessagePlan:
+    observed_names: Tuple[str, ...]
+    expected_hz: Optional[float]
+    required: bool = True
 
 
 @dataclass
@@ -589,6 +741,8 @@ class CommandResult:
     baud: int
     status: str
     lines: List[str] = field(default_factory=list)
+    logical_message: Optional[str] = None
+    syntax_label: Optional[str] = None
 
 
 @dataclass
@@ -608,6 +762,9 @@ class CaptureState:
     unknown_binary_ids: Dict[int, int] = field(default_factory=dict)
     sent_commands: List[str] = field(default_factory=list)
     command_results: List[CommandResult] = field(default_factory=list)
+    accepted_log_commands: Dict[str, str] = field(default_factory=dict)
+    rejected_log_commands: Dict[str, List[str]] = field(default_factory=dict)
+    log_command_syntax_by_message: Dict[str, str] = field(default_factory=dict)
     text_logs: List[str] = field(default_factory=list)
     nav_ascii: Dict[str, Dict[str, float]] = field(default_factory=dict)
     nav_binary: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -838,6 +995,7 @@ class LiveValidator:
                 self.args.factory_reset,
                 self.args.reset,
                 self.args.send_version,
+                self.args.discover_log_syntax,
                 self.args.apply_profile_config,
                 self.args.apply_profile_logs,
                 self.args.save_config,
@@ -913,13 +1071,16 @@ class LiveValidator:
         self._open_serial(detected_baud)
         self.state.capture_baud = detected_baud
 
-        if self.args.send_version or self.args.factory_reset or self.args.reset or self.args.apply_profile_config or self.args.apply_profile_logs or self.args.save_config:
+        apply_logs = self.args.apply_profile_logs or self.args.discover_log_syntax
+
+        if self.args.send_version or self.args.factory_reset or self.args.reset or self.args.apply_profile_config or apply_logs or self.args.save_config:
             self._query_version()
 
-        should_clear_logs = self.args.apply_profile_logs and (
+        should_clear_logs = apply_logs and (
             self.args.unlog_first
             or self.args.factory_reset
             or self.args.reset
+            or self.args.discover_log_syntax
             or self.args.apply_profile_config
             or self.args.save_config
         )
@@ -933,14 +1094,14 @@ class LiveValidator:
             for command in self.plan.profile_commands:
                 self._send_command(command)
 
-        if self.args.apply_profile_logs:
+        if apply_logs:
             for command in self.plan.log_commands:
-                self._send_command(command)
+                self._apply_log_command_with_fallback(command)
 
         if self.args.save_config:
             self._send_command("SAVECONFIG", response_timeout_sec=DEFAULT_COMMAND_RESPONSE_TIMEOUT_SEC)
 
-        if any((self.args.apply_profile_config, self.args.apply_profile_logs, self.args.factory_reset, self.args.reset, self.args.save_config)):
+        if any((self.args.apply_profile_config, apply_logs, self.args.factory_reset, self.args.reset, self.args.save_config)):
             self._log_console(
                 f"[live-validate] Waiting {DEFAULT_POST_CONFIG_SETTLE_SEC:.1f}s for receiver settle before capture..."
             )
@@ -1009,7 +1170,15 @@ class LiveValidator:
             f"[live-validate] command {result.command} @ {result.baud}: {result.status}{suffix}"
         )
 
-    def _send_command(self, command: str, response_timeout_sec: float = DEFAULT_COMMAND_RESPONSE_TIMEOUT_SEC) -> CommandResult:
+    def _send_command(
+        self,
+        command: str,
+        response_timeout_sec: float = DEFAULT_COMMAND_RESPONSE_TIMEOUT_SEC,
+        *,
+        record: bool = True,
+        logical_message: Optional[str] = None,
+        syntax_label: Optional[str] = None,
+    ) -> CommandResult:
         self._drain_serial(0.10)
         self.serial.write_line(command)
         self.state.sent_commands.append(command)
@@ -1020,11 +1189,54 @@ class LiveValidator:
             baud=self.serial.baud,
             status=classify_command_response(command, lines),
             lines=lines,
+            logical_message=logical_message,
+            syntax_label=syntax_label,
         )
-        self._record_command_result(result)
+        if record:
+            self._record_command_result(result)
         if self.args.command_interval > 0:
             time.sleep(self.args.command_interval)
         return result
+
+    def _apply_log_command_with_fallback(self, canonical_command: str) -> CommandResult:
+        parsed = parse_planned_log_command(canonical_command)
+        if parsed is None:
+            return self._send_command(canonical_command)
+
+        message, syntax_kind, period = parsed
+        rejected: List[str] = []
+        last_result: Optional[CommandResult] = None
+
+        for syntax_label, candidate in build_log_command_variants(message, period, self.args.com_port, syntax_kind):
+            result = self._send_command(
+                candidate,
+                response_timeout_sec=DEFAULT_COMMAND_RESPONSE_TIMEOUT_SEC,
+                record=False,
+                logical_message=message,
+                syntax_label=syntax_label,
+            )
+            last_result = result
+            if result.status == "unsupported":
+                rejected.append(candidate)
+                continue
+
+            self.state.accepted_log_commands[message] = candidate
+            self.state.log_command_syntax_by_message[message] = syntax_label
+            self.state.rejected_log_commands[message] = rejected
+            self._record_command_result(result)
+            return result
+
+        self.state.rejected_log_commands[message] = rejected
+        fallback_result = last_result or CommandResult(
+            command=canonical_command,
+            baud=self.serial.baud,
+            status="unsupported",
+            lines=[],
+            logical_message=message,
+            syntax_label=None,
+        )
+        self._record_command_result(fallback_result)
+        return fallback_result
 
     def _query_version_lines(self) -> List[str]:
         first = self._send_command("VERSION", response_timeout_sec=DEFAULT_COMMAND_RESPONSE_TIMEOUT_SEC)
@@ -1046,15 +1258,23 @@ class LiveValidator:
     def _build_profile_plan(self) -> ProfilePlan:
         log_commands = self._build_log_commands()
         profile_commands = self._build_profile_commands()
-        expected_messages: Dict[str, float] = {}
+        expected_messages: Dict[str, ExpectedMessagePlan] = {}
         for command in log_commands:
-            parts = command.split()
-            if len(parts) >= 4 and parts[0] == "LOG" and parts[2] == "ONTIME":
-                try:
-                    period = float(parts[3])
-                except ValueError:
-                    continue
-                expected_messages[parts[1]] = 1.0 / period if period > 0 else 0.0
+            parsed = parse_planned_log_command(command)
+            if parsed is None:
+                continue
+            message, syntax_kind, period = parsed
+            spec = log_command_spec_for_message(message)
+            if not spec.track_in_summary or not spec.output_names:
+                continue
+            expected_hz = None
+            if syntax_kind != LOG_SYNTAX_UNICORE_ONCHANGED and period is not None:
+                expected_hz = 1.0 / period if period > 0 else 0.0
+            expected_messages[message] = ExpectedMessagePlan(
+                observed_names=spec.output_names,
+                expected_hz=expected_hz,
+                required=spec.track_in_summary,
+            )
 
         return ProfilePlan(log_commands=log_commands,
                            profile_commands=profile_commands,
@@ -1113,18 +1333,20 @@ class LiveValidator:
 
         def add_ascii(message: str, period: float) -> None:
             if output_has_ascii(output_format):
-                commands.append(f"LOG {message} ONTIME {period:g}")
+                commands.append(build_planned_log_command(message, period))
 
         def add_paired(ascii_message: str, binary_message: str, period: float) -> None:
             if output_has_ascii(output_format):
-                commands.append(f"LOG {ascii_message} ONTIME {period:g}")
+                commands.append(build_planned_log_command(ascii_message, period))
             if output_has_binary(output_format):
-                commands.append(f"LOG {binary_message} ONTIME {period:g}")
+                commands.append(build_planned_log_command(binary_message, period))
 
         add_ascii("GPGGA", periods["main"])
         add_paired("PVTSLNA", "PVTSLNB", periods["main"])
         add_paired("BESTNAVA", "BESTNAVB", periods["bestnav"])
-        add_ascii("GNHPR", periods["main"])
+        add_ascii("GPHPR", periods["main"])
+        if output_has_ascii(output_format):
+            commands.append(build_planned_log_command("GPHPR2"))
         add_paired("RTKSTATUSA", "RTKSTATUSB", periods["diagnostic"])
         add_paired("RTCMSTATUSA", "RTCMSTATUSB", periods["diagnostic"])
 
@@ -1190,7 +1412,7 @@ class LiveValidator:
         sentence_type = fields[0]
         self.state.record_message(sentence_type, ts)
         suffix = sentence_suffix(sentence_type)
-        if suffix not in KNOWN_NMEA_SUFFIXES:
+        if suffix not in KNOWN_NMEA_SUFFIXES and sentence_type not in KNOWN_NMEA_TYPES:
             self.state.record_unknown_ascii(sentence_type)
             return
 
@@ -2101,32 +2323,40 @@ class LiveValidator:
         failures: List[str] = []
         expected = self.plan.expected_messages
         message_frequencies: Dict[str, Dict[str, object]] = {}
+        discovery_only = self.args.discover_log_syntax and self.args.duration <= 0.0
 
-        for name, expected_hz in sorted(expected.items()):
-            observed = self.state.message_counters.get(name, MessageCounter())
-            observed_hz = observed.hz(duration_sec)
+        for name, expected_spec in sorted(expected.items()):
+            observed_count = 0
+            observed_hz = 0.0
+            for observed_name in expected_spec.observed_names:
+                observed = self.state.message_counters.get(observed_name, MessageCounter())
+                observed_count += observed.count
+                observed_hz += observed.hz(duration_sec)
             message_frequencies[name] = {
-                "count": observed.count,
-                "expected_hz": round(expected_hz, 3),
+                "count": observed_count,
+                "expected_hz": round(expected_spec.expected_hz, 3) if expected_spec.expected_hz is not None else None,
                 "observed_hz": round(observed_hz, 3),
+                "observed_names": list(expected_spec.observed_names),
             }
-            if observed.count == 0:
+            if discovery_only:
+                continue
+            if expected_spec.required and observed_count == 0:
                 if name in {"PVTSLNA", "PVTSLNB", "BESTNAVA", "BESTNAVB"}:
                     failures.append(f"Expected nav log {name} not observed")
                 else:
                     warnings.append(f"Expected log {name} not observed")
-            elif expected_hz > 0 and observed_hz < expected_hz * LOW_FREQUENCY_RATIO:
+            elif expected_spec.expected_hz is not None and expected_spec.expected_hz > 0 and observed_hz < expected_spec.expected_hz * LOW_FREQUENCY_RATIO:
                 warnings.append(
-                    f"Log {name} is slower than requested ({observed_hz:.2f} Hz < {expected_hz:.2f} Hz)"
+                    f"Log {name} is slower than requested ({observed_hz:.2f} Hz < {expected_spec.expected_hz:.2f} Hz)"
                 )
 
-        if self.state.total_bytes == 0:
+        if self.state.total_bytes == 0 and not discovery_only:
             failures.append("No bytes captured from the serial port")
 
-        if self.args.format in {"hybrid", "binary"} and self.state.binary_frames_total == 0:
+        if self.args.format in {"hybrid", "binary"} and self.state.binary_frames_total == 0 and not discovery_only:
             failures.append(f"Format {self.args.format} requested but no Unicore binary frames were observed")
 
-        if self.args.format == "binary" and self.state.message_counters.get("PVTSLNB", MessageCounter()).count == 0:
+        if self.args.format == "binary" and self.state.message_counters.get("PVTSLNB", MessageCounter()).count == 0 and not discovery_only:
             failures.append("Binary-only run did not observe PVTSLNB")
 
         if self.state.binary_crc_errors > 0:
@@ -2142,6 +2372,8 @@ class LiveValidator:
                 f"Known binary frames seen but not fully parsed: {self.state.binary_known_but_unparsed}"
             )
         for item in self.state.command_results:
+            if item.logical_message and item.logical_message in self.state.accepted_log_commands:
+                continue
             if item.status == "unsupported":
                 warnings.append(f"Command {item.command} was reported unsupported at {item.baud} baud")
             elif item.status == "no_response" and item.command not in {
@@ -2153,6 +2385,13 @@ class LiveValidator:
                 "UNLOGALL",
             }:
                 warnings.append(f"Command {item.command} returned no explicit response at {item.baud} baud")
+        for message, rejected in sorted(self.state.rejected_log_commands.items()):
+            if message in self.state.accepted_log_commands:
+                continue
+            if rejected:
+                warnings.append(
+                    f"No accepted LOG syntax found for {message}; attempted: {', '.join(rejected)}"
+                )
         if self.state.unknown_binary_ids:
             warnings.append(
                 "Unknown binary message IDs: "
@@ -2177,7 +2416,7 @@ class LiveValidator:
             fix_quality = int(nav_ascii.get("fix_quality", 0))
         elif nav_binary:
             fix_quality = int(nav_binary.get("fix_quality", 0))
-        if fix_quality is None or fix_quality <= 0:
+        if (fix_quality is None or fix_quality <= 0) and not discovery_only:
             failures.append("No valid GNSS fix detected in the captured streams")
 
         ascii_visible, ascii_used, ascii_cn0_mean, ascii_cn0_max, ascii_diff_age = self._extract_state_metrics(
@@ -2218,7 +2457,7 @@ class LiveValidator:
                 else None
             ),
         }
-        if self.args.format == "hybrid":
+        if self.args.format == "hybrid" and not discovery_only:
             position_delta = hybrid_comparison["position_delta_m"]
             if position_delta is not None and position_delta > 1.0:
                 warnings.append(f"Hybrid ASCII/binary position delta is high: {position_delta:.3f} m")
@@ -2238,7 +2477,7 @@ class LiveValidator:
         else:
             rtcm_age = time.time() - self.state.latest_rtcm_ascii_ts if self.state.latest_rtcm_ascii_ts else None
         rtcm_alive = rtcm_age is not None and rtcm_age <= RTCM_STALE_TIMEOUT_SEC
-        if any(name.startswith("RTCMSTATUS") for name in expected) and not rtcm_alive:
+        if any(name.startswith("RTCMSTATUS") for name in expected) and not rtcm_alive and not discovery_only:
             warnings.append("RTCM status stream is stale or missing")
 
         summary = {
@@ -2261,12 +2500,14 @@ class LiveValidator:
                 "apply_profile_config": self.args.apply_profile_config,
                 "apply_profile_logs": self.args.apply_profile_logs,
                 "unlog_first": self.args.unlog_first,
+                "discover_log_syntax": self.args.discover_log_syntax,
                 "reboot_wait_sec": self.args.reboot_wait,
                 "capture_started_unix_sec": capture_start_wall,
                 "effective_raw_expected": any(
                     command.startswith("LOG OBSVMCMP")
                     for command in self.plan.log_commands
                 ),
+                "discovery_only": discovery_only,
             },
             "capture": {
                 "total_bytes": self.state.total_bytes,
@@ -2284,12 +2525,17 @@ class LiveValidator:
                 "sent": self.state.sent_commands,
                 "planned_logs": self.plan.log_commands,
                 "planned_profile_commands": self.plan.profile_commands,
+                "accepted_log_commands": self.state.accepted_log_commands,
+                "rejected_log_commands": self.state.rejected_log_commands,
+                "log_command_syntax_by_message": self.state.log_command_syntax_by_message,
                 "results": [
                     {
                         "command": item.command,
                         "baud": item.baud,
                         "status": item.status,
                         "lines": item.lines,
+                        "logical_message": item.logical_message,
+                        "syntax_label": item.syntax_label,
                     }
                     for item in self.state.command_results
                 ],
@@ -2417,12 +2663,28 @@ class LiveValidator:
                 print(
                     f"  @{item['baud']:6d} {item['command']:<24s} {item['status']}{suffix}"
                 )
+        if summary["commands"]["accepted_log_commands"] or summary["commands"]["rejected_log_commands"]:
+            print()
+            print("Log syntax")
+            for message in sorted(summary["commands"]["accepted_log_commands"].keys()):
+                print(
+                    f"  {message:14s} accepted={summary['commands']['accepted_log_commands'][message]} "
+                    f"via={summary['commands']['log_command_syntax_by_message'].get(message, 'n/a')}"
+                )
+            for message, rejected in sorted(summary["commands"]["rejected_log_commands"].items()):
+                if message in summary["commands"]["accepted_log_commands"]:
+                    continue
+                print(
+                    f"  {message:14s} rejected={', '.join(rejected) if rejected else 'none'}"
+                )
         print()
         print("Expected messages")
         for name, item in summary["expected_messages"].items():
+            expected_hz = item["expected_hz"]
+            expected_text = f"{expected_hz:6.2f} Hz" if expected_hz is not None else "onchange"
             print(
                 f"  {name:14s} count={item['count']:3d}  observed={item['observed_hz']:6.2f} Hz  "
-                f"expected={item['expected_hz']:6.2f} Hz"
+                f"expected={expected_text}"
             )
         if summary["config"]["format"] == "hybrid":
             hybrid = summary["hybrid_comparison"]
@@ -2530,6 +2792,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--apply-profile-logs",
         action="store_true",
         help="Send the built-in UM98x profile LOG schedule before capture",
+    )
+    parser.add_argument(
+        "--discover-log-syntax",
+        action="store_true",
+        help="Probe alternate LOG syntaxes for each requested message before capture",
     )
     parser.add_argument(
         "--unlog-first",
