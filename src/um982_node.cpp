@@ -45,6 +45,13 @@ struct TimedData
   SteadyTime received_at;
 };
 
+struct Cn0Accumulator
+{
+  double sum_db_hz{0.0};
+  double max_db_hz{-1.0};
+  std::size_t sample_count{0U};
+};
+
 diagnostic_msgs::msg::KeyValue kv(const std::string& key, const std::string& value)
 {
   diagnostic_msgs::msg::KeyValue item;
@@ -268,6 +275,35 @@ std::size_t count_bits(uint32_t value)
   return count;
 }
 
+void add_cn0_sample(Cn0Accumulator& acc, double cn0_db_hz)
+{
+  if (!std::isfinite(cn0_db_hz) || cn0_db_hz <= 0.0)
+  {
+    return;
+  }
+  acc.sum_db_hz += cn0_db_hz;
+  acc.max_db_hz = std::max(acc.max_db_hz, cn0_db_hz);
+  ++acc.sample_count;
+}
+
+std::string mean_cn0_or_na(const Cn0Accumulator& acc)
+{
+  if (acc.sample_count == 0U)
+  {
+    return "n/a";
+  }
+  return to_string_or_nan(acc.sum_db_hz / static_cast<double>(acc.sample_count));
+}
+
+std::string max_cn0_or_na(const Cn0Accumulator& acc)
+{
+  if (acc.sample_count == 0U)
+  {
+    return "n/a";
+  }
+  return to_string_or_nan(acc.max_db_hz);
+}
+
 }  // namespace
 
 class Um982Node : public rclcpp::Node
@@ -289,6 +325,9 @@ public:
     max_diff_age_sec_ = declare_parameter<double>("max_diff_age_sec", 5.0);
     enable_rtk_status_ = declare_parameter<bool>("enable_rtk_status", true);
     enable_rtcm_status_ = declare_parameter<bool>("enable_rtcm_status", true);
+    enable_satellite_status_ = declare_parameter<bool>("enable_satellite_status", true);
+    enable_satsinfo_ = declare_parameter<bool>("enable_satsinfo", true);
+    satellite_diag_timeout_sec_ = declare_parameter<double>("satellite_diag_timeout_sec", 5.0);
 
     serial_.configure(port_, baudrate_);
 
@@ -312,13 +351,14 @@ public:
 
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
-                "rtcm_timeout=%.1fs max_diff_age=%.1fs",
+                "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
                 heading_topic_.c_str(),
                 rtcm_timeout_sec_,
-                max_diff_age_sec_);
+                max_diff_age_sec_,
+                satellite_diag_timeout_sec_);
   }
 
 private:
@@ -487,6 +527,16 @@ private:
       }
     }
 
+    if (parsed->bestsat.has_value())
+    {
+      latest_bestsat_ = TimedData<BestSatData>{*parsed->bestsat, received_at};
+    }
+
+    if (parsed->satsinfo.has_value())
+    {
+      latest_satsinfo_ = TimedData<SatsInfoData>{*parsed->satsinfo, received_at};
+    }
+
     if (parsed->gsv.has_value())
     {
       // Per-constellation satellite-in-view tally. Talker prefix
@@ -540,6 +590,26 @@ private:
         is_fresh(latest_rtcm_status_->received_at, rtcm_timeout_sec_))
     {
       return latest_rtcm_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<BestSatData> active_bestsat() const
+  {
+    if (latest_bestsat_.has_value() &&
+        is_fresh(latest_bestsat_->received_at, satellite_diag_timeout_sec_))
+    {
+      return latest_bestsat_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<SatsInfoData> active_satsinfo() const
+  {
+    if (latest_satsinfo_.has_value() &&
+        is_fresh(latest_satsinfo_->received_at, satellite_diag_timeout_sec_))
+    {
+      return latest_satsinfo_->data;
     }
     return std::nullopt;
   }
@@ -747,45 +817,167 @@ private:
     s.name = "GPS: satellites";
     s.hardware_id = "unicore_um982";
     const auto bestnav = active_bestnav();
+    const auto bestsat = active_bestsat();
+    const auto satsinfo = active_satsinfo();
+    const double bestsat_age = latest_bestsat_.has_value()
+                                   ? age_seconds(latest_bestsat_->received_at)
+                                   : std::numeric_limits<double>::infinity();
+    const double satsinfo_age = latest_satsinfo_.has_value()
+                                    ? age_seconds(latest_satsinfo_->received_at)
+                                    : std::numeric_limits<double>::infinity();
 
-    int total = 0;
-    std::string per_const;
+    static const std::array<std::string, 5> kPrimaryConstellations = {
+        "GPS", "GLO", "GAL", "BDS", "QZSS"};
+    static const std::array<std::string, 8> kTrackedBands = {
+        "L1", "L2", "L5", "E1", "E5", "B1", "B2", "B3"};
     static const std::unordered_map<std::string, std::string> kTalkerNames = {
         {"GP", "GPS"}, {"GL", "GLO"}, {"GA", "GAL"}, {"GB", "BDS"},
-        {"GQ", "QZSS"}, {"GI", "NavIC"}, {"GN", "GNSS"}};
+        {"GQ", "QZSS"}, {"GI", "IRNSS"}, {"GN", "GNSS"}};
+
+    std::unordered_map<std::string, int> visible_by_constellation;
+    std::unordered_map<std::string, int> used_by_constellation;
+    std::unordered_map<std::string, Cn0Accumulator> cn0_by_constellation;
+    std::unordered_map<std::string, int> signal_count_by_band;
+    Cn0Accumulator cn0_all;
+
+    int total = 0;
     for (const auto& [talker, timed] : gsv_counts_)
     {
       const int v = is_fresh(timed.received_at) ? timed.data : 0;
       total += v;
       const auto it = kTalkerNames.find(talker);
       const std::string label = it != kTalkerNames.end() ? it->second : talker;
-      if (!per_const.empty()) per_const += ", ";
-      per_const += label + "=" + std::to_string(v);
+      visible_by_constellation[label] = v;
       s.values.push_back(kv("sats_" + talker, std::to_string(v)));
     }
-    const int tracked = bestnav.has_value() ? bestnav->satellites_tracked : total;
-    const int used = bestnav.has_value() ? bestnav->satellites_used : total;
-    s.values.push_back(kv("visible", std::to_string(total)));
-    s.values.push_back(kv("tracked", std::to_string(tracked)));
-    s.values.push_back(kv("used", std::to_string(used)));
-    s.values.push_back(kv("constellations_used", per_const));
-    s.values.push_back(kv("mean_cno_db_hz", "n/a"));   // UM982 doesn't expose per-sat CN0
-    s.values.push_back(kv("cno_ge_40_count", "n/a"));
 
-    if (gsv_counts_.empty() || total == 0)
+    int visible_total = total;
+    if (enable_satellite_status_ && enable_satsinfo_ && satsinfo.has_value())
+    {
+      visible_total = 0;
+      visible_by_constellation.clear();
+      for (const auto& entry : satsinfo->entries)
+      {
+        ++visible_total;
+        ++visible_by_constellation[entry.constellation];
+        for (const auto& signal : entry.signals)
+        {
+          add_cn0_sample(cn0_all, signal.cn0_db_hz);
+          add_cn0_sample(cn0_by_constellation[signal.constellation], signal.cn0_db_hz);
+          if (!signal.band.empty() && signal.cn0_db_hz > 0.0)
+          {
+            ++signal_count_by_band[signal.band];
+          }
+        }
+      }
+    }
+
+    int used_total = bestnav.has_value() ? bestnav->satellites_used : total;
+    if (enable_satellite_status_ && bestsat.has_value())
+    {
+      used_total = static_cast<int>(bestsat->entries.size());
+      used_by_constellation.clear();
+      for (const auto& entry : bestsat->entries)
+      {
+        ++used_by_constellation[entry.constellation];
+      }
+    }
+
+    std::string constellation_summary;
+    for (const auto& name : kPrimaryConstellations)
+    {
+      const int visible_count = visible_by_constellation[name];
+      const int used_count = used_by_constellation[name];
+      if (visible_count <= 0 && used_count <= 0)
+      {
+        continue;
+      }
+      if (!constellation_summary.empty())
+      {
+        constellation_summary += ", ";
+      }
+      constellation_summary += name + "=" + std::to_string(visible_count) + "/" +
+                               std::to_string(used_count);
+    }
+
+    const int tracked = bestnav.has_value() ? bestnav->satellites_tracked : visible_total;
+    s.values.push_back(kv("satellite_status_enabled", enable_satellite_status_ ? "True" : "False"));
+    s.values.push_back(kv("satsinfo_enabled", enable_satsinfo_ ? "True" : "False"));
+    s.values.push_back(kv("bestsat_available", bestsat.has_value() ? "True" : "False"));
+    s.values.push_back(kv("satsinfo_available", satsinfo.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("last_bestsat_age_s", std::isfinite(bestsat_age) ? to_string_or_nan(bestsat_age) : "inf"));
+    s.values.push_back(kv("last_satsinfo_age_s",
+                          std::isfinite(satsinfo_age) ? to_string_or_nan(satsinfo_age) : "inf"));
+    s.values.push_back(kv("visible", std::to_string(visible_total)));
+    s.values.push_back(kv("tracked", std::to_string(tracked)));
+    s.values.push_back(kv("used", std::to_string(used_total)));
+    s.values.push_back(kv("constellations_used",
+                          constellation_summary.empty() ? "n/a" : constellation_summary));
+    s.values.push_back(kv("cn0_mean_db_hz", mean_cn0_or_na(cn0_all)));
+    s.values.push_back(kv("cn0_max_db_hz", max_cn0_or_na(cn0_all)));
+
+    for (const auto& name : kPrimaryConstellations)
+    {
+      s.values.push_back(kv("visible_" + name, std::to_string(visible_by_constellation[name])));
+      s.values.push_back(kv("used_" + name, std::to_string(used_by_constellation[name])));
+      s.values.push_back(kv("cn0_mean_" + name + "_db_hz", mean_cn0_or_na(cn0_by_constellation[name])));
+    }
+
+    for (const auto& band : kTrackedBands)
+    {
+      s.values.push_back(kv("tracked_signals_" + band,
+                            std::to_string(signal_count_by_band[band])));
+    }
+
+    if (!enable_satellite_status_)
+    {
+      if (gsv_counts_.empty() || total == 0)
+      {
+        s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+        s.message = "advanced satellite diagnostics disabled; waiting for GSV fallback";
+      }
+      else
+      {
+        s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+        s.message = std::to_string(total) + " sats via GSV fallback";
+      }
+    }
+    else if (enable_satsinfo_ && !satsinfo.has_value() && gsv_counts_.empty())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      s.message = "no satellites — receiver dead or GSV not enabled";
+      s.message = "SATSINFOA missing and no GSV fallback";
     }
-    else if (total < 6)
+    else if (enable_satsinfo_ && !satsinfo.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = std::to_string(total) + " sats — weak for RTK";
+      s.message = "SATSINFOA stale or missing";
+    }
+    else if (visible_total == 0)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "no visible satellites";
+    }
+    else if (!bestsat.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "BESTSATA stale or missing";
+    }
+    else if (bestsat.has_value() && used_total == 0)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "satellites visible but none used";
+    }
+    else if (visible_total < 6)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = std::to_string(visible_total) + " visible sats — weak sky view";
     }
     else
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = std::to_string(total) + " sats (" + per_const + ")";
+      s.message = std::to_string(visible_total) + " visible / " + std::to_string(used_total) +
+                  " used";
     }
     return s;
   }
@@ -1112,8 +1304,11 @@ private:
   double read_poll_hz_{200.0};
   double rtcm_timeout_sec_{5.0};
   double max_diff_age_sec_{5.0};
+  double satellite_diag_timeout_sec_{5.0};
   bool enable_rtk_status_{true};
   bool enable_rtcm_status_{true};
+  bool enable_satellite_status_{true};
+  bool enable_satsinfo_{true};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -1132,6 +1327,8 @@ private:
   std::optional<TimedData<VelocityData>> latest_velocity_;
   std::optional<TimedData<RtkStatusData>> latest_rtk_status_;
   std::optional<TimedData<RtcmStatusData>> latest_rtcm_status_;
+  std::optional<TimedData<BestSatData>> latest_bestsat_;
+  std::optional<TimedData<SatsInfoData>> latest_satsinfo_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
 

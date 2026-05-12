@@ -100,6 +100,21 @@ constexpr std::size_t kRtcmstatusaBaseStationIdIndex = 11;
 constexpr std::size_t kRtcmstatusaSatelliteCountIndex = 12;
 constexpr std::size_t kRtcmstatusaL1CountIndex = 13;
 constexpr std::size_t kRtcmstatusaL6CountIndex = 18;
+
+// BESTSATA layout per Table 7-92 in N4 R1.4:
+//   #BESTSATA,<ascii_header>;#entries,constellation,satellite_id,status,signal_mask,...
+constexpr std::size_t kBestsataEntryCountIndex = 9;
+constexpr std::size_t kBestsataFirstEntryIndex = 10;
+constexpr std::size_t kBestsataEntryFieldCount = 4;
+
+// SATSINFOA layout per Table 7-109 in N4 R1.4:
+//   #SATSINFOA,<ascii_header>;sat_count,version,res,res,res,freq_flag,...
+constexpr std::size_t kSatsinfoaSatelliteCountIndex = 9;
+constexpr std::size_t kSatsinfoaVersionIndex = 10;
+constexpr std::size_t kSatsinfoaFrequencyFlagIndex = 14;
+constexpr std::size_t kSatsinfoaFirstSatelliteIndex = 15;
+constexpr std::size_t kSatsinfoaBaseSatelliteFieldCount = 7;
+constexpr std::size_t kSatsinfoaExtraFrequencyFieldCount = 4;
 // N4 R1.4 PVTSLNA layout:
 //   #PVTSLNA,<ascii_header>;bestpos_type,bestpos_hgt,bestpos_lat,...
 //
@@ -153,6 +168,125 @@ std::string trim_ascii_quotes(std::string_view text)
     return std::string(text.substr(1U, text.size() - 2U));
   }
   return std::string(text);
+}
+
+std::string normalize_constellation_name(std::string_view text)
+{
+  if (text == "GPS") return "GPS";
+  if (text == "GLONASS" || text == "GLO") return "GLO";
+  if (text == "GALILEO" || text == "GAL") return "GAL";
+  if (text == "BEIDOU" || text == "BDS") return "BDS";
+  if (text == "QZSS") return "QZSS";
+  if (text == "IRNSS" || text == "NAVIC") return "IRNSS";
+  if (text == "SBAS") return "SBAS";
+  return std::string(text);
+}
+
+std::string constellation_name_from_system_id(int system_id)
+{
+  switch (system_id)
+  {
+    case 0:
+      return "GPS";
+    case 1:
+      return "GLO";
+    case 2:
+      return "SBAS";
+    case 3:
+      return "GAL";
+    case 4:
+      return "BDS";
+    case 5:
+      return "QZSS";
+    case 6:
+      return "IRNSS";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+std::vector<std::string> bestsat_signal_bands(std::string_view constellation, uint32_t signal_mask)
+{
+  std::vector<std::string> bands;
+  if (constellation == "GPS")
+  {
+    if ((signal_mask & 0x01U) != 0U) bands.emplace_back("L1");
+    if ((signal_mask & 0x02U) != 0U) bands.emplace_back("L2");
+    if ((signal_mask & 0x04U) != 0U) bands.emplace_back("L5");
+  }
+  else if (constellation == "GLO")
+  {
+    if ((signal_mask & 0x01U) != 0U) bands.emplace_back("L1");
+    if ((signal_mask & 0x02U) != 0U) bands.emplace_back("L2");
+    if ((signal_mask & 0x04U) != 0U) bands.emplace_back("L3");
+  }
+  else if (constellation == "BDS")
+  {
+    if ((signal_mask & 0x01U) != 0U) bands.emplace_back("B1");
+    if ((signal_mask & 0x02U) != 0U) bands.emplace_back("B2");
+    if ((signal_mask & 0x04U) != 0U) bands.emplace_back("B3");
+  }
+  else if (constellation == "GAL")
+  {
+    if ((signal_mask & 0x01U) != 0U) bands.emplace_back("E1");
+    if ((signal_mask & 0x02U) != 0U) bands.emplace_back("E5");
+    if ((signal_mask & 0x04U) != 0U) bands.emplace_back("E5");
+    if ((signal_mask & 0x08U) != 0U) bands.emplace_back("E6");
+  }
+  return bands;
+}
+
+std::string signal_band_from_frequency_id(std::string_view constellation, int frequency_id)
+{
+  if (constellation == "GPS" || constellation == "QZSS")
+  {
+    if (frequency_id == 0 || frequency_id == 3 || frequency_id == 11) return "L1";
+    if (frequency_id == 9 || frequency_id == 17) return "L2";
+    if (frequency_id == 6 || frequency_id == 14) return "L5";
+    if (constellation == "QZSS" &&
+        (frequency_id == 18 || frequency_id == 22 || frequency_id == 24 || frequency_id == 25))
+    {
+      return "L6";
+    }
+  }
+  else if (constellation == "GLO")
+  {
+    if (frequency_id == 0) return "L1";
+    if (frequency_id == 5) return "L2";
+    if (frequency_id == 6 || frequency_id == 7) return "L3";
+  }
+  else if (constellation == "GAL")
+  {
+    if (frequency_id == 1 || frequency_id == 2) return "E1";
+    if (frequency_id == 12 || frequency_id == 17) return "E5";
+    if (frequency_id == 18 || frequency_id == 22) return "E6";
+  }
+  else if (constellation == "BDS")
+  {
+    if (frequency_id == 0 || frequency_id == 4 || frequency_id == 8 || frequency_id == 23)
+    {
+      return "B1";
+    }
+    if (frequency_id == 5 || frequency_id == 17 || frequency_id == 12 ||
+        frequency_id == 28 || frequency_id == 13)
+    {
+      return "B2";
+    }
+    if (frequency_id == 6 || frequency_id == 21)
+    {
+      return "B3";
+    }
+  }
+  else if (constellation == "SBAS")
+  {
+    if (frequency_id == 0) return "L1";
+    if (frequency_id == 6) return "L5";
+  }
+  else if (constellation == "IRNSS")
+  {
+    if (frequency_id == 6 || frequency_id == 14) return "L5";
+  }
+  return "";
 }
 
 }  // namespace
@@ -249,6 +383,18 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
     if (fields.front() == "RTCMSTATUSA")
     {
       auto parsed = parse_rtcmstatusa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "BESTSATA")
+    {
+      auto parsed = parse_bestsata(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "SATSINFOA")
+    {
+      auto parsed = parse_satsinfoa(fields);
       parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
       return parsed;
     }
@@ -827,6 +973,170 @@ std::optional<ParsedSentence> Um982Parser::parse_rtcmstatusa(
   sentence.rtcm_status->base_station_id = base_station_id;
   sentence.rtcm_status->satellite_count = satellite_count;
   sentence.rtcm_status->observable_count = observable_count;
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_bestsata(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kBestsataEntryCountIndex)
+  {
+    return std::nullopt;
+  }
+
+  int entry_count = -1;
+  if (!parse_int(field_after_semicolon(fields[kBestsataEntryCountIndex]), entry_count) ||
+      entry_count < 0)
+  {
+    return std::nullopt;
+  }
+
+  const std::size_t required_size =
+      kBestsataFirstEntryIndex + static_cast<std::size_t>(entry_count) * kBestsataEntryFieldCount;
+  if (fields.size() < required_size)
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "BESTSATA";
+  sentence.bestsat = BestSatData{};
+  sentence.bestsat->entry_count = entry_count;
+  sentence.bestsat->entries.reserve(static_cast<std::size_t>(entry_count));
+
+  std::size_t cursor = kBestsataFirstEntryIndex;
+  for (int i = 0; i < entry_count; ++i)
+  {
+    uint32_t signal_mask = 0U;
+    if (!parse_uint32(fields[cursor + 3U], 16, signal_mask))
+    {
+      return std::nullopt;
+    }
+
+    BestSatEntry entry;
+    entry.constellation = normalize_constellation_name(fields[cursor]);
+    entry.satellite_id = std::string(fields[cursor + 1U]);
+    entry.status = std::string(fields[cursor + 2U]);
+    entry.signal_mask = static_cast<int>(signal_mask);
+    entry.common_view = (signal_mask & 0x10U) != 0U;
+    entry.used_signal_bands = bestsat_signal_bands(entry.constellation, signal_mask);
+    sentence.bestsat->entries.push_back(entry);
+    cursor += kBestsataEntryFieldCount;
+  }
+
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_satsinfoa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kSatsinfoaFrequencyFlagIndex)
+  {
+    return std::nullopt;
+  }
+
+  int satellite_count = -1;
+  int version = -1;
+  int frequency_flag = -1;
+  if (!parse_int(field_after_semicolon(fields[kSatsinfoaSatelliteCountIndex]), satellite_count) ||
+      !parse_int(fields[kSatsinfoaVersionIndex], version) ||
+      !parse_int(fields[kSatsinfoaFrequencyFlagIndex], frequency_flag) ||
+      satellite_count < 0)
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "SATSINFOA";
+  sentence.satsinfo = SatsInfoData{};
+  sentence.satsinfo->satellite_count = satellite_count;
+  sentence.satsinfo->version = version;
+  sentence.satsinfo->frequency_flag = frequency_flag;
+  sentence.satsinfo->entries.reserve(static_cast<std::size_t>(satellite_count));
+
+  std::size_t cursor = kSatsinfoaFirstSatelliteIndex;
+  for (int sat_index = 0; sat_index < satellite_count; ++sat_index)
+  {
+    if (cursor + (kSatsinfoaBaseSatelliteFieldCount - 1U) >= fields.size())
+    {
+      return std::nullopt;
+    }
+
+    int prn = -1;
+    int azimuth = -1;
+    int elevation = -1;
+    int system_id = -1;
+    int cn0 = -1;
+    int frequency_id = -1;
+    int frequency_count = -1;
+    if (!parse_int(fields[cursor], prn) ||
+        !parse_int(fields[cursor + 1U], azimuth) ||
+        !parse_int(fields[cursor + 2U], elevation) ||
+        !parse_int(fields[cursor + 3U], system_id) ||
+        !parse_int(fields[cursor + 4U], cn0) ||
+        !parse_int(fields[cursor + 5U], frequency_id) ||
+        !parse_int(fields[cursor + 6U], frequency_count) ||
+        frequency_count <= 0)
+    {
+      return std::nullopt;
+    }
+
+    SatsInfoEntry entry;
+    entry.constellation = constellation_name_from_system_id(system_id);
+    entry.prn = prn;
+    entry.azimuth_deg = azimuth;
+    entry.elevation_deg = elevation;
+
+    SatsInfoSignal primary_signal;
+    primary_signal.constellation = entry.constellation;
+    primary_signal.band = signal_band_from_frequency_id(entry.constellation, frequency_id);
+    primary_signal.system_id = system_id;
+    primary_signal.frequency_id = frequency_id;
+    primary_signal.cn0_db_hz = static_cast<double>(cn0);
+    entry.signals.push_back(primary_signal);
+    cursor += kSatsinfoaBaseSatelliteFieldCount;
+
+    // N4 R1.4 only documents a generic 4-byte "next frequency information"
+    // block for ASCII SATSINFOA. The live sample in the manual expands each
+    // additional frequency as:
+    //   <system_id>,<cn0>,<frequency_id>,<frequency_count>
+    // where the last byte repeats the total per-satellite frequency count.
+    // We rely on that representation here and keep the repeated count only
+    // as a consistency hint, not as a hard requirement.
+    for (int freq_index = 1; freq_index < frequency_count; ++freq_index)
+    {
+      if (cursor + (kSatsinfoaExtraFrequencyFieldCount - 1U) >= fields.size())
+      {
+        return std::nullopt;
+      }
+
+      int extra_system_id = -1;
+      int extra_cn0 = -1;
+      int extra_frequency_id = -1;
+      int repeated_frequency_count = -1;
+      if (!parse_int(fields[cursor], extra_system_id) ||
+          !parse_int(fields[cursor + 1U], extra_cn0) ||
+          !parse_int(fields[cursor + 2U], extra_frequency_id) ||
+          !parse_int(fields[cursor + 3U], repeated_frequency_count))
+      {
+        return std::nullopt;
+      }
+
+      SatsInfoSignal extra_signal;
+      extra_signal.constellation = constellation_name_from_system_id(extra_system_id);
+      extra_signal.band = signal_band_from_frequency_id(extra_signal.constellation,
+                                                        extra_frequency_id);
+      extra_signal.system_id = extra_system_id;
+      extra_signal.frequency_id = extra_frequency_id;
+      extra_signal.cn0_db_hz = static_cast<double>(extra_cn0);
+      entry.signals.push_back(extra_signal);
+      cursor += kSatsinfoaExtraFrequencyFieldCount;
+      (void)repeated_frequency_count;
+    }
+
+    sentence.satsinfo->entries.push_back(entry);
+  }
+
   return sentence;
 }
 

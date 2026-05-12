@@ -116,6 +116,48 @@ struct RtcmStatusData
   std::array<int, 6> observable_count{{-1, -1, -1, -1, -1, -1}};
 };
 
+struct BestSatEntry
+{
+  std::string constellation;
+  std::string satellite_id;
+  std::string status;
+  int signal_mask{-1};
+  bool common_view{false};
+  std::vector<std::string> used_signal_bands;
+};
+
+struct BestSatData
+{
+  int entry_count{-1};
+  std::vector<BestSatEntry> entries;
+};
+
+struct SatsInfoSignal
+{
+  std::string constellation;
+  std::string band;
+  int system_id{-1};
+  int frequency_id{-1};
+  double cn0_db_hz{-1.0};
+};
+
+struct SatsInfoEntry
+{
+  std::string constellation;
+  int prn{-1};
+  int azimuth_deg{-1};
+  int elevation_deg{-1};
+  std::vector<SatsInfoSignal> signals;
+};
+
+struct SatsInfoData
+{
+  int satellite_count{-1};
+  int version{-1};
+  int frequency_flag{-1};
+  std::vector<SatsInfoEntry> entries;
+};
+
 struct GsvData
 {
   // Two-letter NMEA talker prefix carried verbatim from the GSV
@@ -142,6 +184,8 @@ struct ParsedSentence
   std::optional<BestNavData> bestnav;
   std::optional<RtkStatusData> rtk_status;
   std::optional<RtcmStatusData> rtcm_status;
+  std::optional<BestSatData> bestsat;
+  std::optional<SatsInfoData> satsinfo;
   std::optional<GsvData> gsv;
 };
 
@@ -171,6 +215,8 @@ private:
   static std::optional<ParsedSentence> parse_bestnava(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_rtkstatusa(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_rtcmstatusa(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_bestsata(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_satsinfoa(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_gsv(std::string_view talker,
                                                  const std::vector<std::string_view>& fields);
 

@@ -303,6 +303,91 @@ TEST(Um982Parser, ParsesRtcmstatusaDiagnostics)
   EXPECT_EQ(parsed->rtcm_status->observable_count[5], 21);
 }
 
+TEST(Um982Parser, ParsesBestsataUsedSatellites)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "BESTSATA,79,GPS,FINE,2203,226245800,0,0,18,22;4,"
+      "GPS,2,GOOD,00000013,"
+      "GLONASS,2-4,GOOD,00000013,"
+      "GALILEO,5,GOOD,00000001,"
+      "BEIDOU,20,GOOD,00000015"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->bestsat.has_value());
+  EXPECT_EQ(parsed->sentence_type, "BESTSATA");
+  EXPECT_EQ(parsed->bestsat->entry_count, 4);
+  ASSERT_EQ(parsed->bestsat->entries.size(), 4U);
+  EXPECT_EQ(parsed->bestsat->entries[0].constellation, "GPS");
+  EXPECT_EQ(parsed->bestsat->entries[0].satellite_id, "2");
+  EXPECT_EQ(parsed->bestsat->entries[0].signal_mask, 0x13);
+  EXPECT_TRUE(parsed->bestsat->entries[0].common_view);
+  ASSERT_EQ(parsed->bestsat->entries[0].used_signal_bands.size(), 2U);
+  EXPECT_EQ(parsed->bestsat->entries[0].used_signal_bands[0], "L1");
+  EXPECT_EQ(parsed->bestsat->entries[0].used_signal_bands[1], "L2");
+
+  EXPECT_EQ(parsed->bestsat->entries[1].constellation, "GLO");
+  EXPECT_EQ(parsed->bestsat->entries[1].satellite_id, "2-4");
+  EXPECT_EQ(parsed->bestsat->entries[2].constellation, "GAL");
+  EXPECT_EQ(parsed->bestsat->entries[3].constellation, "BDS");
+}
+
+TEST(Um982Parser, ParsesSatsinfoaVisibleSatellitesAndSignals)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "SATSINFOA,96,GPS,FINE,2215,367199000,0,0,18,16;4,2,0,0,0,63,"
+      "2,302,51,0,45,0,2,0,42,9,2,"
+      "65,120,40,1,38,0,1,"
+      "14,180,35,3,41,1,2,3,39,17,2,"
+      "220,20,37,4,35,17,2,4,33,21,2"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->satsinfo.has_value());
+  EXPECT_EQ(parsed->sentence_type, "SATSINFOA");
+  EXPECT_EQ(parsed->satsinfo->satellite_count, 4);
+  EXPECT_EQ(parsed->satsinfo->version, 2);
+  EXPECT_EQ(parsed->satsinfo->frequency_flag, 63);
+  ASSERT_EQ(parsed->satsinfo->entries.size(), 4U);
+
+  EXPECT_EQ(parsed->satsinfo->entries[0].constellation, "GPS");
+  EXPECT_EQ(parsed->satsinfo->entries[0].prn, 2);
+  EXPECT_EQ(parsed->satsinfo->entries[0].azimuth_deg, 302);
+  EXPECT_EQ(parsed->satsinfo->entries[0].elevation_deg, 51);
+  ASSERT_EQ(parsed->satsinfo->entries[0].signals.size(), 2U);
+  EXPECT_EQ(parsed->satsinfo->entries[0].signals[0].band, "L1");
+  EXPECT_EQ(parsed->satsinfo->entries[0].signals[1].band, "L2");
+  EXPECT_NEAR(parsed->satsinfo->entries[0].signals[0].cn0_db_hz, 45.0, 1e-9);
+
+  EXPECT_EQ(parsed->satsinfo->entries[1].constellation, "GLO");
+  ASSERT_EQ(parsed->satsinfo->entries[1].signals.size(), 1U);
+  EXPECT_EQ(parsed->satsinfo->entries[1].signals[0].band, "L1");
+
+  EXPECT_EQ(parsed->satsinfo->entries[2].constellation, "GAL");
+  ASSERT_EQ(parsed->satsinfo->entries[2].signals.size(), 2U);
+  EXPECT_EQ(parsed->satsinfo->entries[2].signals[0].band, "E1");
+  EXPECT_EQ(parsed->satsinfo->entries[2].signals[1].band, "E5");
+
+  EXPECT_EQ(parsed->satsinfo->entries[3].constellation, "BDS");
+  ASSERT_EQ(parsed->satsinfo->entries[3].signals.size(), 2U);
+  EXPECT_EQ(parsed->satsinfo->entries[3].signals[0].band, "B2");
+  EXPECT_EQ(parsed->satsinfo->entries[3].signals[1].band, "B3");
+}
+
+TEST(Um982Parser, ParsesSatsinfoaWithZeroCn0)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "SATSINFOA,96,GPS,FINE,2215,367199000,0,0,18,16;1,2,0,0,0,63,"
+      "28,0,0,0,0,0,1"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->satsinfo.has_value());
+  ASSERT_EQ(parsed->satsinfo->entries.size(), 1U);
+  ASSERT_EQ(parsed->satsinfo->entries[0].signals.size(), 1U);
+  EXPECT_NEAR(parsed->satsinfo->entries[0].signals[0].cn0_db_hz, 0.0, 1e-9);
+}
+
 TEST(Um982Parser, RejectsBadChecksum)
 {
   Um982Parser parser;
