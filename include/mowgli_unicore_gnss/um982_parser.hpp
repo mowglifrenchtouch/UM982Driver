@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -58,6 +59,63 @@ struct VelocityData
   double vertical_std_mps{0.0};
 };
 
+struct BestNavData
+{
+  std::string solution_status;
+  std::string position_type;
+  int fix_quality{0};
+  double latitude_deg{0.0};
+  double longitude_deg{0.0};
+  double height_msl_m{0.0};
+  double undulation_m{0.0};
+  double latitude_std_m{-1.0};
+  double longitude_std_m{-1.0};
+  double height_std_m{-1.0};
+  std::string base_station_id;
+  double diff_age_sec{-1.0};
+  double sol_age_sec{-1.0};
+  int satellites_tracked{-1};
+  int satellites_used{-1};
+  int extended_solution_status{-1};
+  int galileo_bds3_signal_mask{-1};
+  int gps_glonass_bds2_signal_mask{-1};
+  std::string velocity_solution_status;
+  std::string velocity_type;
+  double velocity_latency_sec{-1.0};
+  double velocity_age_sec{-1.0};
+  double horizontal_speed_mps{0.0};
+  double track_over_ground_deg{0.0};
+  double vertical_speed_mps{0.0};
+  double vertical_speed_std_mps{-1.0};
+  double horizontal_speed_std_mps{-1.0};
+};
+
+struct RtkStatusData
+{
+  uint32_t gps_source_mask{0U};
+  uint32_t bds_source_mask_1{0U};
+  uint32_t bds_source_mask_2{0U};
+  uint32_t glonass_source_mask{0U};
+  uint32_t galileo_source_mask_1{0U};
+  uint32_t galileo_source_mask_2{0U};
+  uint32_t qzss_source_mask{0U};
+  std::string position_type;
+  int fix_quality{0};
+  int calculate_status{-1};
+  int ion_detected{-1};
+  int dual_rtk_flag{-1};
+  int adr_observation_count{-1};
+};
+
+struct RtcmStatusData
+{
+  int message_id{-1};
+  int message_count{-1};
+  int base_station_id{-1};
+  int satellite_count{-1};
+  std::array<int, 6> observable_count{{-1, -1, -1, -1, -1, -1}};
+};
+
 struct GsvData
 {
   // Two-letter NMEA talker prefix carried verbatim from the GSV
@@ -67,12 +125,23 @@ struct GsvData
   int satellites_in_view{0};
 };
 
+struct ParserCounters
+{
+  std::size_t parsed_sentences{0U};
+  std::size_t parse_errors{0U};
+  std::size_t nmea_checksum_errors{0U};
+  std::size_t unicore_crc_errors{0U};
+};
+
 struct ParsedSentence
 {
   std::string sentence_type;
   std::optional<FixData> fix;
   std::optional<HeadingData> heading;
   std::optional<VelocityData> velocity;
+  std::optional<BestNavData> bestnav;
+  std::optional<RtkStatusData> rtk_status;
+  std::optional<RtcmStatusData> rtcm_status;
   std::optional<GsvData> gsv;
 };
 
@@ -80,6 +149,7 @@ class Um982Parser
 {
 public:
   std::optional<ParsedSentence> parse_line(const std::string& line) const;
+  ParserCounters counters() const;
 
 private:
   static bool validate_nmea_checksum(std::string_view line);
@@ -88,6 +158,7 @@ private:
   static std::string trim(std::string_view text);
   static bool parse_double(std::string_view field, double& value);
   static bool parse_int(std::string_view field, int& value);
+  static bool parse_uint32(std::string_view field, int base, uint32_t& value);
   static bool parse_latlon(std::string_view value_field,
                            std::string_view hemi_field,
                            bool is_latitude,
@@ -98,6 +169,8 @@ private:
   static std::optional<ParsedSentence> parse_hpr(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_pvtslna(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_bestnava(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_rtkstatusa(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_rtcmstatusa(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_gsv(std::string_view talker,
                                                  const std::vector<std::string_view>& fields);
 
@@ -106,6 +179,8 @@ private:
   // quality value (0-9). Returns 0 when the input is empty or unknown,
   // matching NMEA quality 0 = no fix.
   static int position_type_to_gga_quality(std::string_view text);
+
+  mutable ParserCounters counters_{};
 };
 
 }  // namespace mowgli_unicore_gnss

@@ -47,6 +47,59 @@ constexpr std::size_t kPvtslnaUndulationIndex = 21;
 constexpr std::size_t kPvtslnaBestposTrackedSvsIndex = 22;
 constexpr std::size_t kPvtslnaBestposSolutionSvsIndex = 23;
 constexpr std::size_t kPvtslnaHdopIndex = 39;
+
+// BESTNAVA layout per Table 7-85 in N4 R1.4:
+//   #BESTNAVA,<ascii_header>;p_sol_status,pos_type,lat,lon,hgt,...
+constexpr std::size_t kBestnavaPositionSolutionStatusIndex = 9;
+constexpr std::size_t kBestnavaPositionTypeIndex = 10;
+constexpr std::size_t kBestnavaLatitudeIndex = 11;
+constexpr std::size_t kBestnavaLongitudeIndex = 12;
+constexpr std::size_t kBestnavaHeightIndex = 13;
+constexpr std::size_t kBestnavaUndulationIndex = 14;
+constexpr std::size_t kBestnavaLatitudeStdIndex = 16;
+constexpr std::size_t kBestnavaLongitudeStdIndex = 17;
+constexpr std::size_t kBestnavaHeightStdIndex = 18;
+constexpr std::size_t kBestnavaBaseStationIdIndex = 19;
+constexpr std::size_t kBestnavaDiffAgeIndex = 20;
+constexpr std::size_t kBestnavaSolutionAgeIndex = 21;
+constexpr std::size_t kBestnavaTrackedSvsIndex = 22;
+constexpr std::size_t kBestnavaSolutionSvsIndex = 23;
+constexpr std::size_t kBestnavaExtendedSolutionStatusIndex = 27;
+constexpr std::size_t kBestnavaGalileoBds3SignalMaskIndex = 28;
+constexpr std::size_t kBestnavaGpsGloBds2SignalMaskIndex = 29;
+constexpr std::size_t kBestnavaVelocitySolutionStatusIndex = 30;
+constexpr std::size_t kBestnavaVelocityTypeIndex = 31;
+constexpr std::size_t kBestnavaVelocityLatencyIndex = 32;
+constexpr std::size_t kBestnavaVelocityAgeIndex = 33;
+constexpr std::size_t kBestnavaHorizontalSpeedIndex = 34;
+constexpr std::size_t kBestnavaTrackGroundIndex = 35;
+constexpr std::size_t kBestnavaVerticalSpeedIndex = 36;
+constexpr std::size_t kBestnavaVerticalSpeedStdIndex = 37;
+constexpr std::size_t kBestnavaHorizontalSpeedStdIndex = 38;
+
+// RTKSTATUSA layout per Table 7-121 in N4 R1.4:
+//   #RTKSTATUSA,<ascii_header>;gpsSource,reserved,bdsSource1,...
+constexpr std::size_t kRtkstatusaGpsSourceIndex = 9;
+constexpr std::size_t kRtkstatusaBdsSource1Index = 11;
+constexpr std::size_t kRtkstatusaBdsSource2Index = 12;
+constexpr std::size_t kRtkstatusaGlonassSourceIndex = 14;
+constexpr std::size_t kRtkstatusaGalileoSource1Index = 16;
+constexpr std::size_t kRtkstatusaGalileoSource2Index = 17;
+constexpr std::size_t kRtkstatusaQzssSourceIndex = 18;
+constexpr std::size_t kRtkstatusaPositionTypeIndex = 20;
+constexpr std::size_t kRtkstatusaCalculateStatusIndex = 21;
+constexpr std::size_t kRtkstatusaIonDetectedIndex = 22;
+constexpr std::size_t kRtkstatusaDualRtkFlagIndex = 23;
+constexpr std::size_t kRtkstatusaAdrObservationCountIndex = 24;
+
+// RTCMSTATUSA layout per Table 7-126 in N4 R1.4:
+//   #RTCMSTATUSA,<ascii_header>;msg_id,msg_num,base_id,sats_num,l1,...,l6
+constexpr std::size_t kRtcmstatusaMessageIdIndex = 9;
+constexpr std::size_t kRtcmstatusaMessageCountIndex = 10;
+constexpr std::size_t kRtcmstatusaBaseStationIdIndex = 11;
+constexpr std::size_t kRtcmstatusaSatelliteCountIndex = 12;
+constexpr std::size_t kRtcmstatusaL1CountIndex = 13;
+constexpr std::size_t kRtcmstatusaL6CountIndex = 18;
 // N4 R1.4 PVTSLNA layout:
 //   #PVTSLNA,<ascii_header>;bestpos_type,bestpos_hgt,bestpos_lat,...
 //
@@ -83,6 +136,25 @@ std::string sentence_suffix(std::string_view type)
   return std::string(type.substr(type.size() - 3U));
 }
 
+std::string_view field_after_semicolon(std::string_view field)
+{
+  const std::size_t semi = field.find(';');
+  if (semi == std::string_view::npos)
+  {
+    return field;
+  }
+  return field.substr(semi + 1U);
+}
+
+std::string trim_ascii_quotes(std::string_view text)
+{
+  if (text.size() >= 2U && text.front() == '"' && text.back() == '"')
+  {
+    return std::string(text.substr(1U, text.size() - 2U));
+  }
+  return std::string(text);
+}
+
 }  // namespace
 
 std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) const
@@ -97,6 +169,7 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
   {
     if (!validate_nmea_checksum(trimmed))
     {
+      ++counters_.nmea_checksum_errors;
       return std::nullopt;
     }
 
@@ -110,15 +183,21 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
     const std::string suffix = sentence_suffix(fields.front());
     if (suffix == "GGA")
     {
-      return parse_gga(fields);
+      auto parsed = parse_gga(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
     if (suffix == "HDT")
     {
-      return parse_hdt(fields);
+      auto parsed = parse_hdt(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
     if (suffix == "HPR")
     {
-      return parse_hpr(fields);
+      auto parsed = parse_hpr(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
     if (suffix == "GSV")
     {
@@ -127,7 +206,9 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
       const std::string_view first = fields.front();
       const std::string talker = first.size() >= 5U ? std::string(first.substr(0U, 2U))
                                                     : std::string("GN");
-      return parse_gsv(talker, fields);
+      auto parsed = parse_gsv(talker, fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
     return std::nullopt;
   }
@@ -136,6 +217,7 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
   {
     if (!validate_unicore_crc(trimmed))
     {
+      ++counters_.unicore_crc_errors;
       return std::nullopt;
     }
 
@@ -148,15 +230,36 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
 
     if (fields.front() == "PVTSLNA")
     {
-      return parse_pvtslna(fields);
+      auto parsed = parse_pvtslna(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
     if (fields.front() == "BESTNAVA")
     {
-      return parse_bestnava(fields);
+      auto parsed = parse_bestnava(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "RTKSTATUSA")
+    {
+      auto parsed = parse_rtkstatusa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "RTCMSTATUSA")
+    {
+      auto parsed = parse_rtcmstatusa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
     }
   }
 
   return std::nullopt;
+}
+
+ParserCounters Um982Parser::counters() const
+{
+  return counters_;
 }
 
 bool Um982Parser::validate_nmea_checksum(std::string_view line)
@@ -265,6 +368,24 @@ bool Um982Parser::parse_int(std::string_view field, int& value)
     return false;
   }
   value = static_cast<int>(parsed);
+  return true;
+}
+
+bool Um982Parser::parse_uint32(std::string_view field, int base, uint32_t& value)
+{
+  if (field.empty())
+  {
+    return false;
+  }
+
+  char* end = nullptr;
+  const std::string text(field);
+  const unsigned long parsed = std::strtoul(text.c_str(), &end, base);
+  if (end == nullptr || *end != '\0' || parsed > std::numeric_limits<uint32_t>::max())
+  {
+    return false;
+  }
+  value = static_cast<uint32_t>(parsed);
   return true;
 }
 
@@ -476,36 +597,236 @@ std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
 std::optional<ParsedSentence> Um982Parser::parse_bestnava(
     const std::vector<std::string_view>& fields)
 {
-  if (fields.size() < 6U)
+  if (fields.size() <= kBestnavaHorizontalSpeedStdIndex)
   {
-    return std::nullopt;
+    // Backward-compatible fallback for the older velocity-only test/sample
+    // shape used before BESTNAVA was decoded according to N4 R1.4.
+    if (fields.size() < 6U)
+    {
+      return std::nullopt;
+    }
+
+    double horizontal_speed = 0.0;
+    double track_deg = 0.0;
+    double up_speed = 0.0;
+    double vertical_std = 0.0;
+    double horizontal_std = 0.0;
+
+    if (!parse_double(fields[fields.size() - 5U], horizontal_speed) ||
+        !parse_double(fields[fields.size() - 4U], track_deg) ||
+        !parse_double(fields[fields.size() - 3U], up_speed) ||
+        !parse_double(fields[fields.size() - 2U], vertical_std) ||
+        !parse_double(fields[fields.size() - 1U], horizontal_std))
+    {
+      return std::nullopt;
+    }
+
+    const double track_rad = track_deg * M_PI / 180.0;
+
+    ParsedSentence sentence;
+    sentence.sentence_type = "BESTNAVA";
+    sentence.velocity = VelocityData{};
+    sentence.velocity->east_mps = horizontal_speed * std::sin(track_rad);
+    sentence.velocity->north_mps = horizontal_speed * std::cos(track_rad);
+    sentence.velocity->up_mps = up_speed;
+    sentence.velocity->horizontal_std_mps = horizontal_std;
+    sentence.velocity->vertical_std_mps = vertical_std;
+    return sentence;
   }
 
+  double latitude = 0.0;
+  double longitude = 0.0;
+  double height_msl = 0.0;
+  double undulation = 0.0;
+  double latitude_std = 0.0;
+  double longitude_std = 0.0;
+  double height_std = 0.0;
+  double diff_age = 0.0;
+  double sol_age = 0.0;
+  double velocity_latency = 0.0;
+  double velocity_age = 0.0;
   double horizontal_speed = 0.0;
   double track_deg = 0.0;
-  double up_speed = 0.0;
+  double vertical_speed = 0.0;
   double vertical_std = 0.0;
   double horizontal_std = 0.0;
+  int tracked_satellites = -1;
+  int solution_satellites = -1;
+  uint32_t extended_solution_status = 0U;
 
-  if (!parse_double(fields[fields.size() - 5U], horizontal_speed) ||
-      !parse_double(fields[fields.size() - 4U], track_deg) ||
-      !parse_double(fields[fields.size() - 3U], up_speed) ||
-      !parse_double(fields[fields.size() - 2U], vertical_std) ||
-      !parse_double(fields[fields.size() - 1U], horizontal_std))
+  if (!parse_double(fields[kBestnavaLatitudeIndex], latitude) ||
+      !parse_double(fields[kBestnavaLongitudeIndex], longitude) ||
+      !parse_double(fields[kBestnavaHeightIndex], height_msl) ||
+      !parse_double(fields[kBestnavaUndulationIndex], undulation) ||
+      !parse_double(fields[kBestnavaLatitudeStdIndex], latitude_std) ||
+      !parse_double(fields[kBestnavaLongitudeStdIndex], longitude_std) ||
+      !parse_double(fields[kBestnavaHeightStdIndex], height_std) ||
+      !parse_double(fields[kBestnavaDiffAgeIndex], diff_age) ||
+      !parse_double(fields[kBestnavaSolutionAgeIndex], sol_age) ||
+      !parse_int(fields[kBestnavaTrackedSvsIndex], tracked_satellites) ||
+      !parse_int(fields[kBestnavaSolutionSvsIndex], solution_satellites) ||
+      !parse_uint32(fields[kBestnavaExtendedSolutionStatusIndex], 16, extended_solution_status) ||
+      !parse_double(fields[kBestnavaVelocityLatencyIndex], velocity_latency) ||
+      !parse_double(fields[kBestnavaVelocityAgeIndex], velocity_age) ||
+      !parse_double(fields[kBestnavaHorizontalSpeedIndex], horizontal_speed) ||
+      !parse_double(fields[kBestnavaTrackGroundIndex], track_deg) ||
+      !parse_double(fields[kBestnavaVerticalSpeedIndex], vertical_speed) ||
+      !parse_double(fields[kBestnavaVerticalSpeedStdIndex], vertical_std) ||
+      !parse_double(fields[kBestnavaHorizontalSpeedStdIndex], horizontal_std))
   {
     return std::nullopt;
   }
+
+  std::string_view position_solution_status = field_after_semicolon(
+      fields[kBestnavaPositionSolutionStatusIndex]);
+  const std::string_view position_type = fields[kBestnavaPositionTypeIndex];
+  const std::string_view velocity_solution_status = fields[kBestnavaVelocitySolutionStatusIndex];
+  const std::string_view velocity_type = fields[kBestnavaVelocityTypeIndex];
+
+  uint32_t galileo_bds3_signal_mask = 0U;
+  uint32_t gps_glonass_bds2_signal_mask = 0U;
+  (void)parse_uint32(fields[kBestnavaGalileoBds3SignalMaskIndex], 16, galileo_bds3_signal_mask);
+  (void)parse_uint32(fields[kBestnavaGpsGloBds2SignalMaskIndex], 16, gps_glonass_bds2_signal_mask);
 
   const double track_rad = track_deg * M_PI / 180.0;
 
   ParsedSentence sentence;
   sentence.sentence_type = "BESTNAVA";
+
+  sentence.bestnav = BestNavData{};
+  sentence.bestnav->solution_status = std::string(position_solution_status);
+  sentence.bestnav->position_type = std::string(position_type);
+  sentence.bestnav->fix_quality = position_type_to_gga_quality(position_type);
+  sentence.bestnav->latitude_deg = latitude;
+  sentence.bestnav->longitude_deg = longitude;
+  sentence.bestnav->height_msl_m = height_msl;
+  sentence.bestnav->undulation_m = undulation;
+  sentence.bestnav->latitude_std_m = latitude_std;
+  sentence.bestnav->longitude_std_m = longitude_std;
+  sentence.bestnav->height_std_m = height_std;
+  sentence.bestnav->base_station_id = trim_ascii_quotes(fields[kBestnavaBaseStationIdIndex]);
+  sentence.bestnav->diff_age_sec = diff_age;
+  sentence.bestnav->sol_age_sec = sol_age;
+  sentence.bestnav->satellites_tracked = tracked_satellites;
+  sentence.bestnav->satellites_used = solution_satellites;
+  sentence.bestnav->extended_solution_status = static_cast<int>(extended_solution_status);
+  sentence.bestnav->galileo_bds3_signal_mask =
+      static_cast<int>(galileo_bds3_signal_mask);
+  sentence.bestnav->gps_glonass_bds2_signal_mask =
+      static_cast<int>(gps_glonass_bds2_signal_mask);
+  sentence.bestnav->velocity_solution_status = std::string(velocity_solution_status);
+  sentence.bestnav->velocity_type = std::string(velocity_type);
+  sentence.bestnav->velocity_latency_sec = velocity_latency;
+  sentence.bestnav->velocity_age_sec = velocity_age;
+  sentence.bestnav->horizontal_speed_mps = horizontal_speed;
+  sentence.bestnav->track_over_ground_deg = track_deg;
+  sentence.bestnav->vertical_speed_mps = vertical_speed;
+  sentence.bestnav->vertical_speed_std_mps = vertical_std;
+  sentence.bestnav->horizontal_speed_std_mps = horizontal_std;
+
   sentence.velocity = VelocityData{};
   sentence.velocity->east_mps = horizontal_speed * std::sin(track_rad);
   sentence.velocity->north_mps = horizontal_speed * std::cos(track_rad);
-  sentence.velocity->up_mps = up_speed;
+  sentence.velocity->up_mps = vertical_speed;
   sentence.velocity->horizontal_std_mps = horizontal_std;
   sentence.velocity->vertical_std_mps = vertical_std;
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_rtkstatusa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kRtkstatusaAdrObservationCountIndex)
+  {
+    return std::nullopt;
+  }
+
+  uint32_t gps_source_mask = 0U;
+  uint32_t bds_source_mask_1 = 0U;
+  uint32_t bds_source_mask_2 = 0U;
+  uint32_t glonass_source_mask = 0U;
+  uint32_t galileo_source_mask_1 = 0U;
+  uint32_t galileo_source_mask_2 = 0U;
+  uint32_t qzss_source_mask = 0U;
+  int calculate_status = -1;
+  int ion_detected = -1;
+  int dual_rtk_flag = -1;
+  int adr_observation_count = -1;
+
+  if (!parse_uint32(field_after_semicolon(fields[kRtkstatusaGpsSourceIndex]), 16, gps_source_mask) ||
+      !parse_uint32(fields[kRtkstatusaBdsSource1Index], 16, bds_source_mask_1) ||
+      !parse_uint32(fields[kRtkstatusaBdsSource2Index], 16, bds_source_mask_2) ||
+      !parse_uint32(fields[kRtkstatusaGlonassSourceIndex], 16, glonass_source_mask) ||
+      !parse_uint32(fields[kRtkstatusaGalileoSource1Index], 16, galileo_source_mask_1) ||
+      !parse_uint32(fields[kRtkstatusaGalileoSource2Index], 16, galileo_source_mask_2) ||
+      !parse_uint32(fields[kRtkstatusaQzssSourceIndex], 16, qzss_source_mask) ||
+      !parse_int(fields[kRtkstatusaCalculateStatusIndex], calculate_status) ||
+      !parse_int(fields[kRtkstatusaIonDetectedIndex], ion_detected) ||
+      !parse_int(fields[kRtkstatusaDualRtkFlagIndex], dual_rtk_flag) ||
+      !parse_int(fields[kRtkstatusaAdrObservationCountIndex], adr_observation_count))
+  {
+    return std::nullopt;
+  }
+
+  const std::string_view position_type = fields[kRtkstatusaPositionTypeIndex];
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "RTKSTATUSA";
+  sentence.rtk_status = RtkStatusData{};
+  sentence.rtk_status->gps_source_mask = gps_source_mask;
+  sentence.rtk_status->bds_source_mask_1 = bds_source_mask_1;
+  sentence.rtk_status->bds_source_mask_2 = bds_source_mask_2;
+  sentence.rtk_status->glonass_source_mask = glonass_source_mask;
+  sentence.rtk_status->galileo_source_mask_1 = galileo_source_mask_1;
+  sentence.rtk_status->galileo_source_mask_2 = galileo_source_mask_2;
+  sentence.rtk_status->qzss_source_mask = qzss_source_mask;
+  sentence.rtk_status->position_type = std::string(position_type);
+  sentence.rtk_status->fix_quality = position_type_to_gga_quality(position_type);
+  sentence.rtk_status->calculate_status = calculate_status;
+  sentence.rtk_status->ion_detected = ion_detected;
+  sentence.rtk_status->dual_rtk_flag = dual_rtk_flag;
+  sentence.rtk_status->adr_observation_count = adr_observation_count;
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_rtcmstatusa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kRtcmstatusaL6CountIndex)
+  {
+    return std::nullopt;
+  }
+
+  int message_id = -1;
+  int message_count = -1;
+  int base_station_id = -1;
+  int satellite_count = -1;
+  std::array<int, 6> observable_count{{-1, -1, -1, -1, -1, -1}};
+
+  if (!parse_int(field_after_semicolon(fields[kRtcmstatusaMessageIdIndex]), message_id) ||
+      !parse_int(fields[kRtcmstatusaMessageCountIndex], message_count) ||
+      !parse_int(fields[kRtcmstatusaBaseStationIdIndex], base_station_id) ||
+      !parse_int(fields[kRtcmstatusaSatelliteCountIndex], satellite_count))
+  {
+    return std::nullopt;
+  }
+
+  for (std::size_t i = 0U; i < observable_count.size(); ++i)
+  {
+    if (!parse_int(fields[kRtcmstatusaL1CountIndex + i], observable_count[i]))
+    {
+      return std::nullopt;
+    }
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "RTCMSTATUSA";
+  sentence.rtcm_status = RtcmStatusData{};
+  sentence.rtcm_status->message_id = message_id;
+  sentence.rtcm_status->message_count = message_count;
+  sentence.rtcm_status->base_station_id = base_station_id;
+  sentence.rtcm_status->satellite_count = satellite_count;
+  sentence.rtcm_status->observable_count = observable_count;
   return sentence;
 }
 

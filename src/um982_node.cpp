@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
@@ -88,6 +90,184 @@ std::string heading_source_name(HeadingSource source)
   return "unknown";
 }
 
+const char* fix_type_from_quality(int quality)
+{
+  if (quality == 4) return "3D-RTK-Fixed";
+  if (quality == 5) return "3D-RTK-Float";
+  if (quality == 2 || quality == 9) return "3D-DGPS";
+  if (quality == 1) return "3D";
+  return "no-fix";
+}
+
+const char* carrier_solution_from_quality(int quality)
+{
+  if (quality == 4) return "fixed";
+  if (quality == 5) return "float";
+  return "none";
+}
+
+std::string to_hex_byte(int value)
+{
+  if (value < 0)
+  {
+    return "n/a";
+  }
+  std::ostringstream oss;
+  oss << "0x";
+  oss.setf(std::ios::hex, std::ios::basefield);
+  oss.setf(std::ios::uppercase);
+  if (value < 0x10)
+  {
+    oss << '0';
+  }
+  oss << value;
+  return oss.str();
+}
+
+std::string to_hex_word(uint32_t value)
+{
+  std::ostringstream oss;
+  oss << "0x";
+  oss.setf(std::ios::hex, std::ios::basefield);
+  oss.setf(std::ios::uppercase);
+  oss << value;
+  return oss.str();
+}
+
+std::string join_strings(const std::vector<std::string>& values)
+{
+  std::string joined;
+  for (const auto& value : values)
+  {
+    if (value.empty())
+    {
+      continue;
+    }
+    if (!joined.empty())
+    {
+      joined += ", ";
+    }
+    joined += value;
+  }
+  return joined.empty() ? std::string("n/a") : joined;
+}
+
+std::string describe_gps_glo_bds2_signal_mask(int mask)
+{
+  if (mask < 0)
+  {
+    return "n/a";
+  }
+
+  std::vector<std::string> parts;
+  if ((mask & 0x01) != 0) parts.emplace_back("GPS L1");
+  if ((mask & 0x02) != 0) parts.emplace_back("GPS L2");
+  if ((mask & 0x04) != 0) parts.emplace_back("GPS L5");
+  if ((mask & 0x08) != 0) parts.emplace_back("BDS2 B3I");
+  if ((mask & 0x10) != 0) parts.emplace_back("GLO L1");
+  if ((mask & 0x20) != 0) parts.emplace_back("GLO L2");
+  if ((mask & 0x40) != 0) parts.emplace_back("BDS2 B1I");
+  if ((mask & 0x80) != 0) parts.emplace_back("BDS2 B2I");
+  return join_strings(parts);
+}
+
+std::string describe_galileo_bds3_signal_mask(int mask)
+{
+  if (mask < 0)
+  {
+    return "n/a";
+  }
+
+  std::vector<std::string> parts;
+  if ((mask & 0x01) != 0) parts.emplace_back("GAL E1");
+  if ((mask & 0x02) != 0) parts.emplace_back("GAL E5b");
+  if ((mask & 0x04) != 0) parts.emplace_back("GAL E5a");
+  if ((mask & 0x10) != 0) parts.emplace_back("BDS3 B1I");
+  if ((mask & 0x20) != 0) parts.emplace_back("BDS3 B3I");
+  if ((mask & 0x40) != 0) parts.emplace_back("BDS3 B2a");
+  if ((mask & 0x80) != 0) parts.emplace_back("BDS3 B1C");
+  return join_strings(parts);
+}
+
+std::string describe_ext_solution_status(int value)
+{
+  if (value < 0)
+  {
+    return "n/a";
+  }
+
+  const bool rtk_checked = (value & 0x01) != 0;
+  const int iono_mode = (value >> 1) & 0x07;
+  std::string iono_text = "unknown";
+  switch (iono_mode)
+  {
+    case 1:
+      iono_text = "klobuchar";
+      break;
+    case 2:
+      iono_text = "sbas_grid";
+      break;
+    case 3:
+      iono_text = "multi_freq";
+      break;
+    case 4:
+      iono_text = "pseudorange_diff";
+      break;
+    default:
+      break;
+  }
+  return std::string("rtk_checked=") + (rtk_checked ? "true" : "false") + ", iono=" + iono_text;
+}
+
+std::string describe_rtk_calculate_status(int value)
+{
+  switch (value)
+  {
+    case 0:
+      return "no differential data";
+    case 1:
+      return "base insufficient obs";
+    case 2:
+      return "high differential latency";
+    case 3:
+      return "active ionosphere";
+    case 4:
+      return "rover insufficient obs";
+    case 5:
+      return "rtk solution available";
+    default:
+      return "unknown";
+  }
+}
+
+std::string describe_dual_rtk_flag(int value)
+{
+  switch (value)
+  {
+    case 0:
+      return "baseline unsolved";
+    case 1:
+      return "within limit";
+    case 2:
+      return "out of limit";
+    case 255:
+      return "baseline length not configured";
+    default:
+      return "unknown";
+  }
+}
+
+std::size_t count_bits(uint32_t value)
+{
+  std::size_t count = 0U;
+  while (value != 0U)
+  {
+    count += static_cast<std::size_t>(value & 1U);
+    value >>= 1U;
+  }
+  return count;
+}
+
 }  // namespace
 
 class Um982Node : public rclcpp::Node
@@ -105,6 +285,10 @@ public:
     heading_topic_ = declare_parameter<std::string>("heading_topic", "/gps/azimuth");
     diagnostics_topic_ = declare_parameter<std::string>("diagnostics_topic", "/gps/diagnostics");
     rtcm_topic_ = declare_parameter<std::string>("rtcm_topic", "/ntrip_client/rtcm");
+    rtcm_timeout_sec_ = declare_parameter<double>("rtcm_timeout_sec", 5.0);
+    max_diff_age_sec_ = declare_parameter<double>("max_diff_age_sec", 5.0);
+    enable_rtk_status_ = declare_parameter<bool>("enable_rtk_status", true);
+    enable_rtcm_status_ = declare_parameter<bool>("enable_rtcm_status", true);
 
     serial_.configure(port_, baudrate_);
 
@@ -127,11 +311,14 @@ public:
                                            std::bind(&Um982Node::publish_diagnostics, this));
 
     RCLCPP_INFO(get_logger(),
-                "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s",
+                "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
+                "rtcm_timeout=%.1fs max_diff_age=%.1fs",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
-                heading_topic_.c_str());
+                heading_topic_.c_str(),
+                rtcm_timeout_sec_,
+                max_diff_age_sec_);
   }
 
 private:
@@ -275,6 +462,31 @@ private:
       latest_velocity_ = TimedData<VelocityData>{*parsed->velocity, received_at};
     }
 
+    if (parsed->bestnav.has_value())
+    {
+      latest_bestnav_ = TimedData<BestNavData>{*parsed->bestnav, received_at};
+    }
+
+    if (parsed->rtk_status.has_value())
+    {
+      latest_rtk_status_ = TimedData<RtkStatusData>{*parsed->rtk_status, received_at};
+      last_rtkstatus_time_ = received_at;
+    }
+
+    if (parsed->rtcm_status.has_value())
+    {
+      latest_rtcm_status_ = TimedData<RtcmStatusData>{*parsed->rtcm_status, received_at};
+      last_rtcmstatus_time_ = received_at;
+      if (parsed->rtcm_status->message_id >= 0)
+      {
+        recent_rtcm_message_ids_.push_back(parsed->rtcm_status->message_id);
+        if (recent_rtcm_message_ids_.size() > 8U)
+        {
+          recent_rtcm_message_ids_.pop_front();
+        }
+      }
+    }
+
     if (parsed->gsv.has_value())
     {
       // Per-constellation satellite-in-view tally. Talker prefix
@@ -288,21 +500,56 @@ private:
 
   bool is_fresh(const SteadyTime& stamp) const
   {
+    return is_fresh(stamp, data_timeout_sec_);
+  }
+
+  bool is_fresh(const SteadyTime& stamp, double timeout_sec) const
+  {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - stamp).count() <=
-           data_timeout_sec_;
+           timeout_sec;
+  }
+
+  double age_seconds(const SteadyTime& stamp) const
+  {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - stamp).count();
+  }
+
+  std::optional<BestNavData> active_bestnav() const
+  {
+    if (latest_bestnav_.has_value() &&
+        is_fresh(latest_bestnav_->received_at, std::max(2.0, rtcm_timeout_sec_)))
+    {
+      return latest_bestnav_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RtkStatusData> active_rtk_status() const
+  {
+    if (latest_rtk_status_.has_value() &&
+        is_fresh(latest_rtk_status_->received_at, rtcm_timeout_sec_))
+    {
+      return latest_rtk_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RtcmStatusData> active_rtcm_status() const
+  {
+    if (latest_rtcm_status_.has_value() &&
+        is_fresh(latest_rtcm_status_->received_at, rtcm_timeout_sec_))
+    {
+      return latest_rtcm_status_->data;
+    }
+    return std::nullopt;
   }
 
   std::optional<FixData> active_fix() const
   {
+    // Keep NavSatFix publication tied to the validated position streams
+    // from PR1: PVTSLNA first, then GGA as a fallback.
     if (latest_pvtslna_fix_.has_value() && latest_pvtslna_fix_->data.valid_fix &&
         is_fresh(latest_pvtslna_fix_->received_at))
-     // PVTSLNA position + covariance is what we want, but its
-      // position-type string isn't always recognised by
-      // position_type_to_gga_quality() on every firmware revision —
-      // when that happens fix_quality lands at 0 (NONE) even though
-      // the receiver clearly has a fix. Graft GGA's quality onto the
-      // PVTSLNA fix so downstream NavSatStatus and the carr_soln
-      // diagnostic both see the right value.
     {
       return latest_pvtslna_fix_->data;
     }
@@ -424,13 +671,11 @@ private:
     s.name = "GPS: fix";
     s.hardware_id = "unicore_um982";
 
-    const int q = fix.has_value() ? fix->fix_quality : 0;
-    const char* carr_soln = "none";
-    const char* fix_type = "no-fix";
-    if (q == 4) { carr_soln = "fixed"; fix_type = "3D-RTK-Fixed"; }
-    else if (q == 5) { carr_soln = "float"; fix_type = "3D-RTK-Float"; }
-    else if (q == 2 || q == 9) { fix_type = "3D-DGPS"; }
-    else if (q == 1) { fix_type = "3D"; }
+    const auto bestnav = active_bestnav();
+    const int raw_quality = fix.has_value() ? fix->fix_quality : 0;
+    const int q = raw_quality > 0 ? raw_quality : (bestnav.has_value() ? bestnav->fix_quality : 0);
+    const char* carr_soln = carrier_solution_from_quality(q);
+    const char* fix_type = fix_type_from_quality(q);
 
     double sigma_xy_mm = -1.0;
     if (fix.has_value() && fix->has_covariance)
@@ -453,6 +698,19 @@ private:
       s.values.push_back(kv("longitude_deg", to_string_or_nan(fix->longitude_deg)));
       s.values.push_back(kv("altitude_m", to_string_or_nan(fix->altitude_m)));
       s.values.push_back(kv("fix_source", fix_source_name(fix->source)));
+    }
+    if (bestnav.has_value())
+    {
+      s.values.push_back(kv("solution_status", bestnav->solution_status));
+      s.values.push_back(kv("position_type", bestnav->position_type));
+      s.values.push_back(kv("diff_age_s", to_string_or_nan(bestnav->diff_age_sec)));
+      s.values.push_back(kv("sol_age_s", to_string_or_nan(bestnav->sol_age_sec)));
+      s.values.push_back(kv("tracked_svs", std::to_string(bestnav->satellites_tracked)));
+      s.values.push_back(kv("soln_svs", std::to_string(bestnav->satellites_used)));
+      s.values.push_back(
+          kv("ext_solution_status", to_hex_byte(bestnav->extended_solution_status)));
+      s.values.push_back(kv("ext_solution_detail",
+                            describe_ext_solution_status(bestnav->extended_solution_status)));
     }
 
     if (!serial_.is_open())
@@ -488,6 +746,7 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: satellites";
     s.hardware_id = "unicore_um982";
+    const auto bestnav = active_bestnav();
 
     int total = 0;
     std::string per_const;
@@ -504,8 +763,11 @@ private:
       per_const += label + "=" + std::to_string(v);
       s.values.push_back(kv("sats_" + talker, std::to_string(v)));
     }
+    const int tracked = bestnav.has_value() ? bestnav->satellites_tracked : total;
+    const int used = bestnav.has_value() ? bestnav->satellites_used : total;
     s.values.push_back(kv("visible", std::to_string(total)));
-    s.values.push_back(kv("used", std::to_string(total)));
+    s.values.push_back(kv("tracked", std::to_string(tracked)));
+    s.values.push_back(kv("used", std::to_string(used)));
     s.values.push_back(kv("constellations_used", per_const));
     s.values.push_back(kv("mean_cno_db_hz", "n/a"));   // UM982 doesn't expose per-sat CN0
     s.values.push_back(kv("cno_ge_40_count", "n/a"));
@@ -528,11 +790,139 @@ private:
     return s;
   }
 
+  diagnostic_msgs::msg::DiagnosticStatus gps_rtk_status() const
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: RTK";
+    s.hardware_id = "unicore_um982";
+
+    const auto bestnav = active_bestnav();
+    const auto rtk_status = active_rtk_status();
+    const double bestnav_age = latest_bestnav_.has_value() ? age_seconds(latest_bestnav_->received_at)
+                                                           : std::numeric_limits<double>::infinity();
+    const double rtkstatus_age =
+        last_rtkstatus_time_.has_value() ? age_seconds(*last_rtkstatus_time_)
+                                         : std::numeric_limits<double>::infinity();
+    const int quality = bestnav.has_value() ? bestnav->fix_quality
+                                            : (rtk_status.has_value() ? rtk_status->fix_quality : 0);
+
+    s.values.push_back(kv("status_enabled", enable_rtk_status_ ? "True" : "False"));
+    s.values.push_back(
+        kv("last_bestnav_age_s", std::isfinite(bestnav_age) ? to_string_or_nan(bestnav_age) : "inf"));
+    s.values.push_back(kv("last_rtkstatus_age_s",
+                          std::isfinite(rtkstatus_age) ? to_string_or_nan(rtkstatus_age) : "inf"));
+    s.values.push_back(kv("fix_type", fix_type_from_quality(quality)));
+
+    if (bestnav.has_value())
+    {
+      s.values.push_back(kv("solution_status", bestnav->solution_status));
+      s.values.push_back(kv("position_type", bestnav->position_type));
+      s.values.push_back(kv("diff_age_s", to_string_or_nan(bestnav->diff_age_sec)));
+      s.values.push_back(kv("sol_age_s", to_string_or_nan(bestnav->sol_age_sec)));
+      s.values.push_back(kv("tracked_svs", std::to_string(bestnav->satellites_tracked)));
+      s.values.push_back(kv("soln_svs", std::to_string(bestnav->satellites_used)));
+      s.values.push_back(
+          kv("signal_mask_gal_bds3", to_hex_byte(bestnav->galileo_bds3_signal_mask)));
+      s.values.push_back(kv("signal_mask_gps_glo_bds2",
+                            to_hex_byte(bestnav->gps_glonass_bds2_signal_mask)));
+      s.values.push_back(kv("signals_used_gal_bds3",
+                            describe_galileo_bds3_signal_mask(bestnav->galileo_bds3_signal_mask)));
+      s.values.push_back(
+          kv("signals_used_gps_glo_bds2",
+             describe_gps_glo_bds2_signal_mask(bestnav->gps_glonass_bds2_signal_mask)));
+      s.values.push_back(
+          kv("ext_solution_status", to_hex_byte(bestnav->extended_solution_status)));
+      s.values.push_back(kv("ext_solution_detail",
+                            describe_ext_solution_status(bestnav->extended_solution_status)));
+    }
+
+    if (rtk_status.has_value())
+    {
+      const std::size_t gps_corr = count_bits(rtk_status->gps_source_mask);
+      const std::size_t bds_corr = count_bits(rtk_status->bds_source_mask_1) +
+                                   count_bits(rtk_status->bds_source_mask_2);
+      const std::size_t glo_corr = count_bits(rtk_status->glonass_source_mask);
+      const std::size_t gal_corr = count_bits(rtk_status->galileo_source_mask_1) +
+                                   count_bits(rtk_status->galileo_source_mask_2);
+      const std::size_t qzss_corr = count_bits(rtk_status->qzss_source_mask);
+
+      s.values.push_back(kv("rtkstatus_position_type", rtk_status->position_type));
+      s.values.push_back(
+          kv("rtk_calculate_status", describe_rtk_calculate_status(rtk_status->calculate_status)));
+      s.values.push_back(kv("adr_observations", std::to_string(rtk_status->adr_observation_count)));
+      s.values.push_back(kv("ion_detected", std::to_string(rtk_status->ion_detected)));
+      s.values.push_back(kv("dual_rtk_flag", describe_dual_rtk_flag(rtk_status->dual_rtk_flag)));
+      s.values.push_back(kv("gps_corr_sats", std::to_string(gps_corr)));
+      s.values.push_back(kv("bds_corr_sats", std::to_string(bds_corr)));
+      s.values.push_back(kv("glo_corr_sats", std::to_string(glo_corr)));
+      s.values.push_back(kv("gal_corr_sats", std::to_string(gal_corr)));
+      s.values.push_back(kv("qzss_corr_sats", std::to_string(qzss_corr)));
+      s.values.push_back(kv("gps_source_mask", to_hex_word(rtk_status->gps_source_mask)));
+      s.values.push_back(kv("bds_source_mask_1", to_hex_word(rtk_status->bds_source_mask_1)));
+      s.values.push_back(kv("bds_source_mask_2", to_hex_word(rtk_status->bds_source_mask_2)));
+      s.values.push_back(
+          kv("glonass_source_mask", to_hex_word(rtk_status->glonass_source_mask)));
+      s.values.push_back(
+          kv("galileo_source_mask_1", to_hex_word(rtk_status->galileo_source_mask_1)));
+      s.values.push_back(
+          kv("galileo_source_mask_2", to_hex_word(rtk_status->galileo_source_mask_2)));
+      s.values.push_back(kv("qzss_source_mask", to_hex_word(rtk_status->qzss_source_mask)));
+    }
+
+    if (!enable_rtk_status_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RTK status diagnostics disabled";
+    }
+    else if (!bestnav.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "BESTNAVA stale or missing";
+    }
+    else if (!rtk_status.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RTKSTATUSA stale or missing";
+    }
+    else if (bestnav->solution_status != "SOL_COMPUTED")
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "solution not computed";
+    }
+    else if (bestnav->diff_age_sec > max_diff_age_sec_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RTCM corrections too old";
+    }
+    else if (quality == 4)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RTK fixed";
+    }
+    else if (quality == 5)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RTK float";
+    }
+    else if (quality > 0)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "non-RTK solution";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "no valid RTK solution";
+    }
+
+    return s;
+  }
+
   diagnostic_msgs::msg::DiagnosticStatus gps_ntrip_status()
   {
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: NTRIP/RTCM";
-    s.hardware_id = "ntrip_client";
+    s.hardware_id = "unicore_um982";
 
     constexpr double window_s = 5.0;
     const auto now_t = std::chrono::steady_clock::now();
@@ -543,31 +933,116 @@ private:
     }
     const std::size_t n = rtcm_history_.size();
     const double rate = static_cast<double>(n) / window_s;
-    const double age =
+    const double injection_age =
         rtcm_history_.empty()
             ? std::numeric_limits<double>::infinity()
             : std::chrono::duration<double>(now_t - rtcm_history_.back()).count();
+    const auto rtcm_status = active_rtcm_status();
+    const double receiver_age = last_rtcmstatus_time_.has_value()
+                                    ? age_seconds(*last_rtcmstatus_time_)
+                                    : std::numeric_limits<double>::infinity();
 
     s.values.push_back(kv("msgs_per_sec", to_string_or_nan(rate)));
     s.values.push_back(
-        kv("age_of_last_corr_s", std::isfinite(age) ? to_string_or_nan(age) : "inf"));
+        kv("age_of_last_injected_corr_s",
+           std::isfinite(injection_age) ? to_string_or_nan(injection_age) : "inf"));
+    s.values.push_back(
+        kv("age_of_last_rtcmstatus_s",
+           std::isfinite(receiver_age) ? to_string_or_nan(receiver_age) : "inf"));
     s.values.push_back(kv("rtcm_messages_total", std::to_string(rtcm_message_count_)));
     s.values.push_back(kv("rtcm_bytes_total", std::to_string(rtcm_byte_count_)));
+    s.values.push_back(kv("rtcm_status_enabled", enable_rtcm_status_ ? "True" : "False"));
+
+    std::string recent_types = "n/a";
+    if (!recent_rtcm_message_ids_.empty())
+    {
+      std::vector<std::string> ids;
+      ids.reserve(recent_rtcm_message_ids_.size());
+      for (const int message_id : recent_rtcm_message_ids_)
+      {
+        ids.emplace_back(std::to_string(message_id));
+      }
+      recent_types = join_strings(ids);
+    }
+    s.values.push_back(kv("recent_rtcm_types", recent_types));
+
+    if (rtcm_status.has_value())
+    {
+      s.values.push_back(kv("last_rtcm_msg_id", std::to_string(rtcm_status->message_id)));
+      s.values.push_back(kv("last_rtcm_counter", std::to_string(rtcm_status->message_count)));
+      s.values.push_back(kv("last_rtcm_base_id", std::to_string(rtcm_status->base_station_id)));
+      s.values.push_back(kv("last_rtcm_satellites", std::to_string(rtcm_status->satellite_count)));
+      s.values.push_back(kv("last_rtcm_l1", std::to_string(rtcm_status->observable_count[0])));
+      s.values.push_back(kv("last_rtcm_l2", std::to_string(rtcm_status->observable_count[1])));
+      s.values.push_back(kv("last_rtcm_l3", std::to_string(rtcm_status->observable_count[2])));
+      s.values.push_back(kv("last_rtcm_l4", std::to_string(rtcm_status->observable_count[3])));
+      s.values.push_back(kv("last_rtcm_l5", std::to_string(rtcm_status->observable_count[4])));
+      s.values.push_back(kv("last_rtcm_l6", std::to_string(rtcm_status->observable_count[5])));
+    }
 
     if (rtcm_history_.empty())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
       s.message = "no RTCM in last 5 s";
     }
-    else if (age > 2.0)
+    else if (injection_age > rtcm_timeout_sec_)
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "RTCM stalling (age " + to_string_or_nan(age) + " s)";
+      s.message = "RTCM injection stale";
+    }
+    else if (enable_rtcm_status_ && !rtcm_status.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "waiting for RTCMSTATUSA";
+    }
+    else if (enable_rtcm_status_ && receiver_age > rtcm_timeout_sec_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RTCMSTATUSA stale";
     }
     else
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = to_string_or_nan(rate) + " msg/s, last " + to_string_or_nan(age) + " s ago";
+      s.message = to_string_or_nan(rate) + " msg/s, last injection " +
+                  to_string_or_nan(injection_age) + " s ago";
+    }
+    return s;
+  }
+
+  diagnostic_msgs::msg::DiagnosticStatus gps_parser_status()
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: parser";
+    s.hardware_id = "unicore_um982";
+
+    const ParserCounters current = parser_.counters();
+    const std::size_t delta_parse = current.parse_errors - parser_counters_snapshot_.parse_errors;
+    const std::size_t delta_nmea_crc =
+        current.nmea_checksum_errors - parser_counters_snapshot_.nmea_checksum_errors;
+    const std::size_t delta_unicore_crc =
+        current.unicore_crc_errors - parser_counters_snapshot_.unicore_crc_errors;
+
+    s.values.push_back(kv("parsed_sentences_total", std::to_string(current.parsed_sentences)));
+    s.values.push_back(kv("parse_errors_total", std::to_string(current.parse_errors)));
+    s.values.push_back(
+        kv("nmea_checksum_errors_total", std::to_string(current.nmea_checksum_errors)));
+    s.values.push_back(
+        kv("unicore_crc_errors_total", std::to_string(current.unicore_crc_errors)));
+    s.values.push_back(kv("parse_errors_delta", std::to_string(delta_parse)));
+    s.values.push_back(kv("nmea_checksum_errors_delta", std::to_string(delta_nmea_crc)));
+    s.values.push_back(kv("unicore_crc_errors_delta", std::to_string(delta_unicore_crc)));
+
+    parser_counters_snapshot_ = current;
+
+    if (delta_parse > 0U || delta_nmea_crc > 0U || delta_unicore_crc > 0U)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "new parse/CRC errors observed";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "parser healthy";
     }
     return s;
   }
@@ -580,7 +1055,12 @@ private:
     const auto fix = active_fix();
     array.status.push_back(gps_fix_status(fix));
     array.status.push_back(gps_satellites_status());
+    if (enable_rtk_status_)
+    {
+      array.status.push_back(gps_rtk_status());
+    }
     array.status.push_back(gps_ntrip_status());
+    array.status.push_back(gps_parser_status());
     diagnostics_pub_->publish(array);
   }
 
@@ -630,6 +1110,10 @@ private:
   double data_timeout_sec_{1.0};
   double reconnect_interval_sec_{1.0};
   double read_poll_hz_{200.0};
+  double rtcm_timeout_sec_{5.0};
+  double max_diff_age_sec_{5.0};
+  bool enable_rtk_status_{true};
+  bool enable_rtcm_status_{true};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -642,9 +1126,14 @@ private:
 
   std::optional<TimedData<FixData>> latest_gga_fix_;
   std::optional<TimedData<FixData>> latest_pvtslna_fix_;
+  std::optional<TimedData<BestNavData>> latest_bestnav_;
   std::optional<TimedData<HeadingData>> latest_hdt_heading_;
   std::optional<TimedData<HeadingData>> latest_hpr_heading_;
   std::optional<TimedData<VelocityData>> latest_velocity_;
+  std::optional<TimedData<RtkStatusData>> latest_rtk_status_;
+  std::optional<TimedData<RtcmStatusData>> latest_rtcm_status_;
+  std::optional<SteadyTime> last_rtkstatus_time_;
+  std::optional<SteadyTime> last_rtcmstatus_time_;
 
   std::unordered_map<std::string, std::size_t> sentence_counts_;
   std::unordered_map<std::string, TimedData<int>> gsv_counts_;
@@ -654,6 +1143,8 @@ private:
   // GPS: NTRIP/RTCM diagnostic. Bounded to ~1024 entries so a
   // chatty caster can't unbounded-grow the deque.
   std::deque<std::chrono::steady_clock::time_point> rtcm_history_;
+  std::deque<int> recent_rtcm_message_ids_;
+  ParserCounters parser_counters_snapshot_{};
 
   rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr fix_pub_;
   rclcpp::Publisher<compass_msgs::msg::Azimuth>::SharedPtr heading_pub_;

@@ -218,11 +218,107 @@ TEST(Um982Parser, ParsesBestnavaVelocity)
   EXPECT_NEAR(parsed->velocity->vertical_std_mps, 0.2, 1e-6);
 }
 
+TEST(Um982Parser, ParsesBestnavaStructuredDiagnostics)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "BESTNAVA,97,GPS,FINE,2294,472312000,0,0,18,16;SOL_COMPUTED,SINGLE,"
+      "40.07895888272,116.23651029820,65.8312,-8.4925,WGS84,1.2221,1.1053,2.1970,"
+      "\"0\",0.000,0.000,50,28,28,0,1,12,12,41,SOL_COMPUTED,DOPPLER_VELOCITY,"
+      "0.000,0.000,0.0046,335.592288,0.0045,0.0194,0.0123"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->bestnav.has_value());
+  ASSERT_TRUE(parsed->velocity.has_value());
+  EXPECT_EQ(parsed->sentence_type, "BESTNAVA");
+  EXPECT_EQ(parsed->bestnav->solution_status, "SOL_COMPUTED");
+  EXPECT_EQ(parsed->bestnav->position_type, "SINGLE");
+  EXPECT_EQ(parsed->bestnav->fix_quality, 1);
+  EXPECT_NEAR(parsed->bestnav->latitude_deg, 40.07895888272, 1e-12);
+  EXPECT_NEAR(parsed->bestnav->longitude_deg, 116.23651029820, 1e-12);
+  EXPECT_NEAR(parsed->bestnav->height_msl_m, 65.8312, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->latitude_std_m, 1.2221, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->longitude_std_m, 1.1053, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->height_std_m, 2.1970, 1e-9);
+  EXPECT_EQ(parsed->bestnav->base_station_id, "0");
+  EXPECT_NEAR(parsed->bestnav->diff_age_sec, 0.0, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->sol_age_sec, 0.0, 1e-9);
+  EXPECT_EQ(parsed->bestnav->satellites_tracked, 50);
+  EXPECT_EQ(parsed->bestnav->satellites_used, 28);
+  EXPECT_EQ(parsed->bestnav->extended_solution_status, 0x12);
+  EXPECT_EQ(parsed->bestnav->galileo_bds3_signal_mask, 0x12);
+  EXPECT_EQ(parsed->bestnav->gps_glonass_bds2_signal_mask, 0x41);
+  EXPECT_EQ(parsed->bestnav->velocity_solution_status, "SOL_COMPUTED");
+  EXPECT_EQ(parsed->bestnav->velocity_type, "DOPPLER_VELOCITY");
+  EXPECT_NEAR(parsed->bestnav->horizontal_speed_mps, 0.0046, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->track_over_ground_deg, 335.592288, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->vertical_speed_mps, 0.0045, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->vertical_speed_std_mps, 0.0194, 1e-9);
+  EXPECT_NEAR(parsed->bestnav->horizontal_speed_std_mps, 0.0123, 1e-9);
+}
+
+TEST(Um982Parser, ParsesRtkstatusaDiagnostics)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "RTKSTATUSA,97,GPS,FINE,2190,365354000,0,0,18,1;0000000F,0,00000003,00000000,0,00000007,0,"
+      "00000001,00000000,00000000,0,NARROW_FLOAT,5,2,1,24,0"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->rtk_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "RTKSTATUSA");
+  EXPECT_EQ(parsed->rtk_status->gps_source_mask, 0x0000000FU);
+  EXPECT_EQ(parsed->rtk_status->bds_source_mask_1, 0x00000003U);
+  EXPECT_EQ(parsed->rtk_status->bds_source_mask_2, 0x00000000U);
+  EXPECT_EQ(parsed->rtk_status->glonass_source_mask, 0x00000007U);
+  EXPECT_EQ(parsed->rtk_status->galileo_source_mask_1, 0x00000001U);
+  EXPECT_EQ(parsed->rtk_status->galileo_source_mask_2, 0x00000000U);
+  EXPECT_EQ(parsed->rtk_status->qzss_source_mask, 0x00000000U);
+  EXPECT_EQ(parsed->rtk_status->position_type, "NARROW_FLOAT");
+  EXPECT_EQ(parsed->rtk_status->fix_quality, 5);
+  EXPECT_EQ(parsed->rtk_status->calculate_status, 5);
+  EXPECT_EQ(parsed->rtk_status->ion_detected, 2);
+  EXPECT_EQ(parsed->rtk_status->dual_rtk_flag, 1);
+  EXPECT_EQ(parsed->rtk_status->adr_observation_count, 24);
+}
+
+TEST(Um982Parser, ParsesRtcmstatusaDiagnostics)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "RTCMSTATUSA,76,GPS,FINE,2219,392572000,0,0,18,187;1124,21186,0,21,0,6,11,0,0,21"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->rtcm_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "RTCMSTATUSA");
+  EXPECT_EQ(parsed->rtcm_status->message_id, 1124);
+  EXPECT_EQ(parsed->rtcm_status->message_count, 21186);
+  EXPECT_EQ(parsed->rtcm_status->base_station_id, 0);
+  EXPECT_EQ(parsed->rtcm_status->satellite_count, 21);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[0], 0);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[1], 6);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[2], 11);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[3], 0);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[4], 0);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[5], 21);
+}
+
 TEST(Um982Parser, RejectsBadChecksum)
 {
   Um982Parser parser;
   const auto parsed = parser.parse_line("$GPHDT,10.0,T*00");
   EXPECT_FALSE(parsed.has_value());
+  EXPECT_EQ(parser.counters().nmea_checksum_errors, 1U);
+}
+
+TEST(Um982Parser, CountsParseErrorsOnMalformedStructuredLog)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "RTCMSTATUSA,76,GPS,FINE,2219,392572000,0,0,18,187;1124,broken,0,21,0,6,11,0,0,21"));
+
+  EXPECT_FALSE(parsed.has_value());
+  EXPECT_EQ(parser.counters().parse_errors, 1U);
 }
 
 }  // namespace mowgli_unicore_gnss
