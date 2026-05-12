@@ -358,6 +358,39 @@ std::string max_cn0_or_na(const Cn0Accumulator& acc)
   return to_string_or_nan(acc.max_db_hz);
 }
 
+template <std::size_t N>
+std::string describe_ordered_counts(const std::unordered_map<std::string, int>& counts,
+                                    const std::array<std::string, N>& preferred_order)
+{
+  std::vector<std::string> parts;
+  parts.reserve(counts.size());
+
+  for (const auto& key : preferred_order)
+  {
+    const auto it = counts.find(key);
+    if (it == counts.end() || it->second <= 0)
+    {
+      continue;
+    }
+    parts.push_back(key + "=" + std::to_string(it->second));
+  }
+
+  std::vector<std::string> extras;
+  extras.reserve(counts.size());
+  for (const auto& [key, value] : counts)
+  {
+    if (value <= 0 ||
+        std::find(preferred_order.begin(), preferred_order.end(), key) != preferred_order.end())
+    {
+      continue;
+    }
+    extras.push_back(key + "=" + std::to_string(value));
+  }
+  std::sort(extras.begin(), extras.end());
+  parts.insert(parts.end(), extras.begin(), extras.end());
+  return join_strings(parts);
+}
+
 std::size_t count_valid_agc_channels(const std::array<int, 3>& values)
 {
   std::size_t count = 0U;
@@ -532,6 +565,11 @@ public:
     enable_hw_status_ = declare_parameter<bool>("enable_hw_status", true);
     enable_jamming_status_ = declare_parameter<bool>("enable_jamming_status", true);
     rf_diag_timeout_sec_ = declare_parameter<double>("rf_diag_timeout_sec", 5.0);
+    enable_raw_observation_diag_ = declare_parameter<bool>("enable_raw_observation_diag", false);
+    use_binary_raw_observations_ = declare_parameter<bool>("use_binary_raw_observations", false);
+    raw_observation_timeout_sec_ = declare_parameter<double>("raw_observation_timeout_sec", 5.0);
+    raw_observation_max_debug_entries_ =
+        std::max(0, declare_parameter<int>("raw_observation_max_debug_entries", 0));
     enable_unicore_binary_ = declare_parameter<bool>("enable_unicore_binary", false);
     binary_parser_strict_crc_ = declare_parameter<bool>("binary_parser_strict_crc", true);
     binary_max_frame_size_ =
@@ -572,6 +610,7 @@ public:
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
                 "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs "
+                "raw_diag_timeout=%.1fs raw_diag=%s use_binary_raw=%s raw_debug_entries=%d "
                 "binary=%s strict_crc=%s binary_max_frame=%zu use_binary_nav=%s "
                 "use_binary_rtk_diag=%s use_binary_satellite_diag=%s use_binary_rtcm_diag=%s "
                 "use_binary_rf_diag=%s use_binary_hw_diag=%s use_binary_jamming_diag=%s "
@@ -584,6 +623,10 @@ public:
                 max_diff_age_sec_,
                 satellite_diag_timeout_sec_,
                 rf_diag_timeout_sec_,
+                raw_observation_timeout_sec_,
+                enable_raw_observation_diag_ ? "true" : "false",
+                use_binary_raw_observations_ ? "true" : "false",
+                raw_observation_max_debug_entries_,
                 enable_unicore_binary_ ? "true" : "false",
                 binary_parser_strict_crc_ ? "true" : "false",
                 binary_max_frame_size_,
@@ -883,6 +926,12 @@ private:
     if (parsed->satsinfo.has_value())
     {
       latest_binary_satsinfo_ = TimedData<SatsInfoData>{*parsed->satsinfo, received_at};
+    }
+
+    if (parsed->raw_observations.has_value())
+    {
+      latest_binary_raw_observations_ =
+          TimedData<RawObservationData>{*parsed->raw_observations, received_at};
     }
 
     if (parsed->agc.has_value())
@@ -1208,6 +1257,25 @@ private:
       }
     }
     return active_ascii_freq_jam_status();
+  }
+
+  std::optional<RawObservationData> active_binary_raw_observations() const
+  {
+    if (latest_binary_raw_observations_.has_value() &&
+        is_fresh(latest_binary_raw_observations_->received_at, raw_observation_timeout_sec_))
+    {
+      return latest_binary_raw_observations_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RawObservationData> active_raw_observations() const
+  {
+    if (!use_binary_raw_observations_)
+    {
+      return std::nullopt;
+    }
+    return active_binary_raw_observations();
   }
 
   std::optional<FixData> active_ascii_fix() const
@@ -2590,6 +2658,110 @@ private:
     return s;
   }
 
+  diagnostic_msgs::msg::DiagnosticStatus gps_raw_observation_status() const
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: raw observations";
+    s.hardware_id = "unicore_um982";
+    if (!enable_raw_observation_diag_)
+    {
+      s.values.push_back(kv("feed_state",
+                            diagnostic_feed_state_name(diagnostic_feed_state(false, false))));
+      s.values.push_back(kv("status_enabled", "False"));
+      s.values.push_back(kv("use_binary_raw_observations", "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "raw observation diagnostics disabled";
+      return s;
+    }
+
+    const auto raw = active_raw_observations();
+    const auto binary_raw = active_binary_raw_observations();
+    const double binary_age = latest_binary_raw_observations_.has_value()
+                                  ? age_seconds(latest_binary_raw_observations_->received_at)
+                                  : std::numeric_limits<double>::infinity();
+    const bool backend_enabled = use_binary_raw_observations_;
+    std::unordered_map<std::string, int> count_by_constellation;
+    std::unordered_map<std::string, int> count_by_signal;
+    Cn0Accumulator cn0_all;
+
+    static const std::array<std::string, 5> kConstellationOrder = {
+        "GPS", "GLO", "GAL", "BDS", "QZSS"};
+    static const std::array<std::string, 11> kSignalOrder = {
+        "L1", "L2", "L3", "L5", "L6", "E1", "E5", "E6", "B1", "B2", "B3"};
+
+    if (raw.has_value())
+    {
+      for (const auto& entry : raw->entries)
+      {
+        ++count_by_constellation[entry.constellation];
+        const std::string signal_key = !entry.signal_band.empty()
+                                           ? entry.signal_band
+                                           : ("SIG" + std::to_string(entry.signal_type));
+        ++count_by_signal[signal_key];
+        add_cn0_sample(cn0_all, entry.cn0_db_hz);
+      }
+    }
+
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(diagnostic_feed_state(
+                                           backend_enabled, raw.has_value()))));
+    s.values.push_back(kv("status_enabled", "True"));
+    s.values.push_back(
+        kv("use_binary_raw_observations", use_binary_raw_observations_ ? "True" : "False"));
+    s.values.push_back(kv("obsvmcmp_available", raw.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_obsvmcmp_available", binary_raw.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("obsvmcmp_age_s", std::isfinite(binary_age) ? to_string_or_nan(binary_age) : "inf"));
+    s.values.push_back(kv("raw_observations_count",
+                          raw.has_value() ? std::to_string(raw->observation_count) : "n/a"));
+    s.values.push_back(kv("raw_observations_by_constellation",
+                          describe_ordered_counts(count_by_constellation, kConstellationOrder)));
+    s.values.push_back(
+        kv("raw_observations_by_signal", describe_ordered_counts(count_by_signal, kSignalOrder)));
+    s.values.push_back(kv("raw_cn0_mean_db_hz", mean_cn0_or_na(cn0_all)));
+    s.values.push_back(kv("raw_cn0_max_db_hz", max_cn0_or_na(cn0_all)));
+
+    if (raw.has_value() && raw_observation_max_debug_entries_ > 0)
+    {
+      const int entry_limit =
+          std::min(raw_observation_max_debug_entries_, static_cast<int>(raw->entries.size()));
+      for (int index = 0; index < entry_limit; ++index)
+      {
+        const auto& entry = raw->entries[static_cast<std::size_t>(index)];
+        std::ostringstream oss;
+        oss << entry.constellation << entry.satellite_id << "/"
+            << (entry.signal_band.empty() ? ("SIG" + std::to_string(entry.signal_type))
+                                          : entry.signal_band)
+            << " doppler=" << to_string_or_nan(entry.doppler_hz)
+            << " cn0=" << to_string_or_nan(entry.cn0_db_hz)
+            << " lock=" << to_string_or_nan(entry.lock_time_sec);
+        s.values.push_back(kv("raw_obs_" + std::to_string(index), oss.str()));
+      }
+    }
+
+    if (!use_binary_raw_observations_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "binary raw observation backend disabled";
+    }
+    else if (!binary_raw.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "OBSVMCMPB stale or missing";
+    }
+    else if (binary_raw->observation_count <= 0)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "no compressed observations";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = std::to_string(binary_raw->observation_count) +
+                  " compressed observations";
+    }
+    return s;
+  }
+
   diagnostic_msgs::msg::DiagnosticStatus gps_parser_status()
   {
     diagnostic_msgs::msg::DiagnosticStatus s;
@@ -2674,6 +2846,7 @@ private:
     array.status.push_back(gps_rf_status());
     array.status.push_back(gps_hardware_status());
     array.status.push_back(gps_jamming_status());
+    array.status.push_back(gps_raw_observation_status());
     array.status.push_back(gps_parser_status());
     diagnostics_pub_->publish(array);
   }
@@ -2735,6 +2908,10 @@ private:
   bool enable_rf_status_{true};
   bool enable_hw_status_{true};
   bool enable_jamming_status_{true};
+  bool enable_raw_observation_diag_{false};
+  bool use_binary_raw_observations_{false};
+  double raw_observation_timeout_sec_{5.0};
+  int raw_observation_max_debug_entries_{0};
   bool enable_unicore_binary_{false};
   bool binary_parser_strict_crc_{true};
   std::size_t binary_max_frame_size_{4096U};
@@ -2782,6 +2959,7 @@ private:
   std::optional<TimedData<RtcmStatusData>> latest_binary_rtcm_status_;
   std::optional<TimedData<BestSatData>> latest_binary_bestsat_;
   std::optional<TimedData<SatsInfoData>> latest_binary_satsinfo_;
+  std::optional<TimedData<RawObservationData>> latest_binary_raw_observations_;
   std::optional<TimedData<AgcData>> latest_binary_agc_;
   std::optional<TimedData<HwStatusData>> latest_binary_hw_status_;
   std::optional<TimedData<JamStatusData>> latest_binary_jam_status_;

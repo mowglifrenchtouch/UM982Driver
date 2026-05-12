@@ -24,6 +24,7 @@ private:
   static std::optional<ParsedSentence> parse_freqjamstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_hwstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_jamstatusb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_obsvmcmpb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_pvtslnb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_rtkstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_rtcmstatusb(const UnicoreBinaryFrame& frame);

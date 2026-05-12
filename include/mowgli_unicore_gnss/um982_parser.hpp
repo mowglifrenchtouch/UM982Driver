@@ -161,6 +161,32 @@ struct SatsInfoData
   std::vector<SatsInfoEntry> entries;
 };
 
+struct RawObservationEntry
+{
+  std::string constellation;
+  std::string satellite_id;
+  std::string signal_band;
+  int system_id{-1};
+  int signal_type{-1};
+  int glonass_frequency_channel{-1};
+  uint32_t tracking_status{0U};
+  bool pseudorange_valid{false};
+  bool carrier_phase_valid{false};
+  double pseudorange_m{-1.0};
+  double carrier_phase_cycles{-1.0};
+  double doppler_hz{-1.0};
+  double cn0_db_hz{-1.0};
+  double lock_time_sec{-1.0};
+  double pseudorange_std_m{-1.0};
+  double carrier_phase_std_cycles{-1.0};
+};
+
+struct RawObservationData
+{
+  int observation_count{-1};
+  std::vector<RawObservationEntry> entries;
+};
+
 struct AgcData
 {
   // L1/L2/L5 AGC register values for the master antenna.
@@ -223,6 +249,7 @@ struct ParsedSentence
   std::optional<RtcmStatusData> rtcm_status;
   std::optional<BestSatData> bestsat;
   std::optional<SatsInfoData> satsinfo;
+  std::optional<RawObservationData> raw_observations;
   std::optional<AgcData> agc;
   std::optional<HwStatusData> hw_status;
   std::optional<JamStatusData> jam_status;

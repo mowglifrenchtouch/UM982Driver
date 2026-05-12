@@ -302,6 +302,7 @@ UnicoreBinaryDispatchCounters UnicoreBinaryDispatcher::counters() const
 const char* UnicoreBinaryDispatcher::known_message_name(uint16_t message_id)
 {
   static const std::unordered_map<uint16_t, const char*> kKnownMessageIds = {
+      {138U, "OBSVMCMP"},
       {218U, "HWSTATUS"},
       {220U, "AGC"},
       {240U, "BESTNAVXYZ"},

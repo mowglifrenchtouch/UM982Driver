@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -120,6 +121,54 @@ void append_char4(std::vector<uint8_t>& out, const char* text)
       return;
     }
   }
+}
+
+void set_bits_le(std::array<uint8_t, 24U>& out,
+                 std::size_t bit_offset,
+                 std::size_t bit_count,
+                 uint64_t value)
+{
+  for (std::size_t bit = 0U; bit < bit_count; ++bit)
+  {
+    const std::size_t absolute_bit = bit_offset + bit;
+    const std::size_t byte_index = absolute_bit / 8U;
+    const std::size_t bit_index = absolute_bit % 8U;
+    const uint8_t mask = static_cast<uint8_t>(1U << bit_index);
+    if (((value >> bit) & 0x01U) != 0U)
+    {
+      out[byte_index] |= mask;
+    }
+    else
+    {
+      out[byte_index] &= static_cast<uint8_t>(~mask);
+    }
+  }
+}
+
+void append_obsvmcmp_record(std::vector<uint8_t>& payload,
+                            uint32_t tracking_status,
+                            int32_t doppler_raw,
+                            uint64_t pseudorange_raw,
+                            int32_t carrier_phase_raw,
+                            uint8_t pseudorange_std_index,
+                            uint8_t carrier_phase_std_index,
+                            uint8_t prn,
+                            uint32_t lock_time_raw,
+                            uint8_t cn0_code,
+                            uint8_t glonass_frequency_number)
+{
+  std::array<uint8_t, 24U> record{};
+  set_bits_le(record, 0U, 32U, tracking_status);
+  set_bits_le(record, 32U, 28U, static_cast<uint32_t>(doppler_raw) & 0x0FFFFFFFU);
+  set_bits_le(record, 60U, 36U, pseudorange_raw & 0x0FFFFFFFFFU);
+  set_bits_le(record, 96U, 32U, static_cast<uint32_t>(carrier_phase_raw));
+  set_bits_le(record, 128U, 4U, pseudorange_std_index & 0x0FU);
+  set_bits_le(record, 132U, 4U, carrier_phase_std_index & 0x0FU);
+  set_bits_le(record, 136U, 8U, prn);
+  set_bits_le(record, 144U, 21U, lock_time_raw & 0x1FFFFFU);
+  set_bits_le(record, 165U, 5U, cn0_code & 0x1FU);
+  set_bits_le(record, 170U, 6U, glonass_frequency_number & 0x3FU);
+  payload.insert(payload.end(), record.begin(), record.end());
 }
 
 std::string make_binary_frame(uint16_t message_id,
@@ -440,6 +489,79 @@ std::vector<uint8_t> make_freqjamstatusb_payload()
   return payload;
 }
 
+std::vector<uint8_t> make_obsvmcmpb_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, 4U);
+
+  append_obsvmcmp_record(payload,
+                         0x00181C23U,  // GPS, signal type 0
+                         512,
+                         2550000U,
+                         102400U,
+                         2U,
+                         3U,
+                         19U,
+                         320U,
+                         24U,
+                         0U);
+  append_obsvmcmp_record(payload,
+                         0x00191C23U,  // GLO, signal type 0
+                         -256,
+                         2660000U,
+                         -20480,
+                         5U,
+                         4U,
+                         57U,
+                         160U,
+                         21U,
+                         16U);         // +9 channel
+  append_obsvmcmp_record(payload,
+                         0x005B1C23U,  // GAL, signal type 2
+                         128,
+                         2770000U,
+                         40960U,
+                         1U,
+                         2U,
+                         12U,
+                         96U,
+                         26U,
+                         0U);
+  append_obsvmcmp_record(payload,
+                         0x00901C23U,  // BDS, signal type 4
+                         64,
+                         2880000U,
+                         51200U,
+                         4U,
+                         1U,
+                         27U,
+                         64U,
+                         0U,
+                         0U);
+  return payload;
+}
+
+std::vector<uint8_t> make_obsvmcmpb_payload_with_count(uint32_t observation_count)
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, observation_count);
+  for (uint32_t index = 0U; index < observation_count; ++index)
+  {
+    append_obsvmcmp_record(payload,
+                           0x00181C23U,
+                           static_cast<int32_t>(128 + (index % 16U)),
+                           2000000U + index * 64U,
+                           static_cast<int32_t>(4096 + index * 8U),
+                           static_cast<uint8_t>(index % 8U),
+                           static_cast<uint8_t>((index + 1U) % 8U),
+                           static_cast<uint8_t>(1U + (index % 32U)),
+                           64U + index,
+                           static_cast<uint8_t>(20U + (index % 8U)),
+                           0U);
+  }
+  return payload;
+}
+
 double mean_cn0(const SatsInfoData& data)
 {
   double sum = 0.0;
@@ -688,6 +810,107 @@ TEST(UnicoreBinaryNavParser, ParsesFreqjamstatusbPayload)
   EXPECT_EQ(parsed->freq_jam_status->cw_flag[0], 2);
   EXPECT_EQ(parsed->freq_jam_status->cw_ratio[1], 0);
   EXPECT_EQ(parsed->freq_jam_status->cw_flag[2], 0);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesObsvmcmpbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 138U;
+  frame.payload = make_obsvmcmpb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->raw_observations.has_value());
+  ASSERT_EQ(parsed->raw_observations->entries.size(), 4U);
+  EXPECT_EQ(parsed->sentence_type, "OBSVMCMPB");
+  EXPECT_EQ(parsed->raw_observations->observation_count, 4);
+
+  const auto& gps = parsed->raw_observations->entries[0];
+  EXPECT_EQ(gps.constellation, "GPS");
+  EXPECT_EQ(gps.satellite_id, "19");
+  EXPECT_EQ(gps.signal_band, "L1");
+  EXPECT_TRUE(gps.pseudorange_valid);
+  EXPECT_TRUE(gps.carrier_phase_valid);
+  EXPECT_NEAR(gps.doppler_hz, 2.0, 1e-6);
+  EXPECT_NEAR(gps.pseudorange_m, 19921.875, 1e-6);
+  EXPECT_NEAR(gps.carrier_phase_cycles, 400.0, 1e-6);
+  EXPECT_NEAR(gps.cn0_db_hz, 44.0, 1e-6);
+  EXPECT_NEAR(gps.lock_time_sec, 10.0, 1e-6);
+
+  const auto& glo = parsed->raw_observations->entries[1];
+  EXPECT_EQ(glo.constellation, "GLO");
+  EXPECT_EQ(glo.satellite_id, "57+9");
+  EXPECT_EQ(glo.glonass_frequency_channel, 9);
+  EXPECT_EQ(glo.signal_band, "L1");
+  EXPECT_NEAR(glo.doppler_hz, -1.0, 1e-6);
+  EXPECT_NEAR(glo.cn0_db_hz, 41.0, 1e-6);
+
+  const auto& gal = parsed->raw_observations->entries[2];
+  EXPECT_EQ(gal.constellation, "GAL");
+  EXPECT_EQ(gal.signal_band, "E1");
+  EXPECT_NEAR(gal.cn0_db_hz, 46.0, 1e-6);
+
+  const auto& bds = parsed->raw_observations->entries[3];
+  EXPECT_EQ(bds.constellation, "BDS");
+  EXPECT_EQ(bds.signal_band, "B2");
+  EXPECT_DOUBLE_EQ(bds.cn0_db_hz, 0.0);
+}
+
+TEST(UnicoreBinaryNavParser, RejectsTruncatedObsvmcmpbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 138U;
+  frame.payload = make_obsvmcmpb_payload();
+  frame.payload.pop_back();
+
+  EXPECT_FALSE(parser.parse(frame).has_value());
+}
+
+TEST(UnicoreBinaryNavParser, ParsesLargeObsvmcmpbPayloadUnderFrameLimit)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 138U;
+  frame.payload = make_obsvmcmpb_payload_with_count(50U);
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->raw_observations.has_value());
+  EXPECT_EQ(parsed->raw_observations->observation_count, 50);
+  ASSERT_EQ(parsed->raw_observations->entries.size(), 50U);
+  EXPECT_EQ(parsed->raw_observations->entries.front().constellation, "GPS");
+  EXPECT_EQ(parsed->raw_observations->entries.back().signal_band, "L1");
+}
+
+TEST(UnicoreBinaryNavParser, ObsvmcmpbZeroCn0CanBeIgnoredInSummaries)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 138U;
+  frame.payload = make_obsvmcmpb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->raw_observations.has_value());
+
+  double cn0_sum = 0.0;
+  int cn0_count = 0;
+  for (const auto& entry : parsed->raw_observations->entries)
+  {
+    if (entry.cn0_db_hz > 0.0)
+    {
+      cn0_sum += entry.cn0_db_hz;
+      ++cn0_count;
+    }
+  }
+
+  ASSERT_EQ(cn0_count, 3);
+  EXPECT_NEAR(cn0_sum / static_cast<double>(cn0_count), 43.6666667, 1e-6);
 }
 
 TEST(UnicoreBinaryNavParser, HybridSamplesMatchAsciiWithinTolerance)

@@ -4,10 +4,12 @@
 
 #include "mowgli_unicore_gnss/unicore_binary_nav.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -23,6 +25,8 @@ constexpr std::size_t kBestsatEntrySize = 16U;
 constexpr std::size_t kFreqjamstatusPayloadSize = 12U;
 constexpr std::size_t kHwstatusPayloadSize = 40U;
 constexpr std::size_t kJamstatusPayloadSize = 8U;
+constexpr std::size_t kObsvmcmpEntrySize = 24U;
+constexpr std::size_t kObsvmcmpMinimumPayloadSize = 4U;
 constexpr std::size_t kPvtslnMinimumPayloadSize = 140U;
 constexpr std::size_t kRtkstatusPayloadSize = 56U;
 constexpr std::size_t kRtcmstatusPayloadSize = 22U;
@@ -357,12 +361,148 @@ std::string bestsat_status_name(uint32_t status_code)
   return std::string("STATUS_") + std::to_string(status_code);
 }
 
+uint64_t bit_mask(std::size_t bit_count)
+{
+  if (bit_count >= 64U)
+  {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return (uint64_t{1} << bit_count) - 1U;
+}
+
+uint64_t read_bits_le(const uint8_t* bytes, std::size_t bit_offset, std::size_t bit_count)
+{
+  uint64_t value = 0U;
+  for (std::size_t bit = 0U; bit < bit_count; ++bit)
+  {
+    const std::size_t absolute_bit = bit_offset + bit;
+    const std::size_t byte_index = absolute_bit / 8U;
+    const std::size_t bit_index = absolute_bit % 8U;
+    if (((bytes[byte_index] >> bit_index) & 0x01U) != 0U)
+    {
+      value |= uint64_t{1} << bit;
+    }
+  }
+  return value;
+}
+
+int64_t sign_extend(uint64_t value, std::size_t bit_count)
+{
+  if (bit_count == 0U || bit_count >= 64U)
+  {
+    return static_cast<int64_t>(value);
+  }
+
+  const uint64_t truncated = value & bit_mask(bit_count);
+  const uint64_t sign_bit = uint64_t{1} << (bit_count - 1U);
+  if ((truncated & sign_bit) == 0U)
+  {
+    return static_cast<int64_t>(truncated);
+  }
+
+  const uint64_t magnitude = ((~truncated) + 1U) & bit_mask(bit_count);
+  return -static_cast<int64_t>(magnitude);
+}
+
+double obsvmcmp_psr_std_m(uint32_t index)
+{
+  static constexpr std::array<double, 16> kPsrStdLookup = {
+      0.050, 0.075, 0.113, 0.169, 0.253, 0.380, 0.570, 0.854,
+      1.281, 2.375, 4.750, 9.500, 19.000, 38.000, 76.000, 152.000};
+  return kPsrStdLookup[index & 0x0FU];
+}
+
+uint32_t obsvmcmp_system_id(uint32_t tracking_status)
+{
+  return (tracking_status >> 16U) & 0x07U;
+}
+
+uint32_t obsvmcmp_signal_type(uint32_t tracking_status)
+{
+  return (tracking_status >> 21U) & 0x1FU;
+}
+
+bool obsvmcmp_l2c_flag(uint32_t tracking_status)
+{
+  return ((tracking_status >> 26U) & 0x01U) != 0U;
+}
+
+bool obsvmcmp_carrier_phase_valid(uint32_t tracking_status)
+{
+  return ((tracking_status >> 19U) & 0x01U) != 0U;
+}
+
+bool obsvmcmp_pseudorange_valid(uint32_t tracking_status)
+{
+  return ((tracking_status >> 20U) & 0x01U) != 0U;
+}
+
+std::string obsvmcmp_signal_band(std::string_view constellation,
+                                 uint32_t signal_type,
+                                 bool l2c_flag)
+{
+  // N4 R1.4 documents the channel-tracking bitfield, but the signal-type to
+  // band mapping is not spelled out as explicitly as SATSINFOB. We therefore
+  // keep the mapping deliberately coarse and band-oriented so survey/debug
+  // diagnostics stay useful without over-claiming exact code families.
+  (void)l2c_flag;
+  if (constellation == "GPS" || constellation == "QZSS")
+  {
+    if (signal_type <= 3U) return "L1";
+    if (signal_type <= 8U) return "L2";
+    if (signal_type <= 15U) return "L5";
+    if (constellation == "QZSS") return "L6";
+  }
+  else if (constellation == "GLO")
+  {
+    if (signal_type <= 1U) return "L1";
+    if (signal_type <= 4U) return "L2";
+    return "L3";
+  }
+  else if (constellation == "GAL")
+  {
+    if (signal_type <= 2U) return "E1";
+    if (signal_type <= 5U) return "E5";
+    return "E6";
+  }
+  else if (constellation == "BDS")
+  {
+    if (signal_type <= 2U) return "B1";
+    if (signal_type <= 5U) return "B2";
+    return "B3";
+  }
+  else if (constellation == "SBAS")
+  {
+    return signal_type <= 1U ? "L1" : "L5";
+  }
+  else if (constellation == "IRNSS")
+  {
+    return "L5";
+  }
+  return "";
+}
+
+std::string obsvmcmp_satellite_id(std::string_view constellation,
+                                  uint32_t prn,
+                                  int glonass_frequency_channel)
+{
+  if (constellation == "GLO" && glonass_frequency_channel != -1)
+  {
+    return std::to_string(prn) +
+           (glonass_frequency_channel > 0 ? "+" : std::string()) +
+           std::to_string(glonass_frequency_channel);
+  }
+  return std::to_string(prn);
+}
+
 }  // namespace
 
 std::optional<ParsedSentence> UnicoreBinaryNavParser::parse(const UnicoreBinaryFrame& frame) const
 {
   switch (frame.message_id)
   {
+    case 138U:
+      return parse_obsvmcmpb(frame);
     case 220U:
       return parse_agcb(frame);
     case 509U:
@@ -777,6 +917,97 @@ std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_jamstatusb(
   sentence.jam_status->position_type = position_type_name(position_type_code);
   sentence.jam_status->cw_ratio = static_cast<int>(cw_ratio);
   sentence.jam_status->cw_flag = static_cast<int>(cw_flag);
+  return sentence;
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_obsvmcmpb(
+    const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kObsvmcmpMinimumPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  uint32_t observation_count = 0U;
+  if (!read_u32(frame.payload, 0U, observation_count))
+  {
+    return std::nullopt;
+  }
+
+  const std::size_t required_size =
+      4U + static_cast<std::size_t>(observation_count) * kObsvmcmpEntrySize;
+  if (frame.payload.size() < required_size)
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "OBSVMCMPB";
+  sentence.raw_observations = RawObservationData{};
+  sentence.raw_observations->observation_count = static_cast<int>(observation_count);
+  sentence.raw_observations->entries.reserve(static_cast<std::size_t>(observation_count));
+
+  for (uint32_t obs_index = 0U; obs_index < observation_count; ++obs_index)
+  {
+    const std::size_t offset = 4U + static_cast<std::size_t>(obs_index) * kObsvmcmpEntrySize;
+    if (!has_range(frame.payload, offset, kObsvmcmpEntrySize))
+    {
+      return std::nullopt;
+    }
+
+    const uint8_t* record = frame.payload.data() + offset;
+    const uint32_t tracking_status = static_cast<uint32_t>(read_bits_le(record, 0U, 32U));
+    const int64_t doppler_raw = sign_extend(read_bits_le(record, 32U, 28U), 28U);
+    const uint64_t pseudorange_raw = read_bits_le(record, 60U, 36U);
+    const int64_t carrier_phase_raw = sign_extend(read_bits_le(record, 96U, 32U), 32U);
+    const uint32_t pseudorange_std_index =
+        static_cast<uint32_t>(read_bits_le(record, 128U, 4U));
+    const uint32_t carrier_phase_std_index =
+        static_cast<uint32_t>(read_bits_le(record, 132U, 4U));
+    const uint32_t prn = static_cast<uint32_t>(read_bits_le(record, 136U, 8U));
+    const uint32_t lock_time_raw = static_cast<uint32_t>(read_bits_le(record, 144U, 21U));
+    const uint32_t cn0_raw = static_cast<uint32_t>(read_bits_le(record, 165U, 5U));
+    const uint32_t glonass_frequency_number =
+        static_cast<uint32_t>(read_bits_le(record, 170U, 6U));
+
+    RawObservationEntry entry;
+    entry.tracking_status = tracking_status;
+    entry.system_id = static_cast<int>(obsvmcmp_system_id(tracking_status));
+    entry.signal_type = static_cast<int>(obsvmcmp_signal_type(tracking_status));
+    entry.constellation = satsinfo_constellation_name_from_system_id(
+        static_cast<uint32_t>(entry.system_id));
+    entry.signal_band = obsvmcmp_signal_band(entry.constellation,
+                                             static_cast<uint32_t>(entry.signal_type),
+                                             obsvmcmp_l2c_flag(tracking_status));
+    if (entry.constellation == "GLO")
+    {
+      entry.glonass_frequency_channel =
+          glonass_frequency_number > 0U ? static_cast<int>(glonass_frequency_number) - 7 : -1;
+    }
+    entry.satellite_id = obsvmcmp_satellite_id(entry.constellation,
+                                               prn,
+                                               entry.glonass_frequency_channel);
+    entry.pseudorange_valid = obsvmcmp_pseudorange_valid(tracking_status);
+    entry.carrier_phase_valid = obsvmcmp_carrier_phase_valid(tracking_status);
+    entry.doppler_hz = static_cast<double>(doppler_raw) / 256.0;
+    entry.pseudorange_m =
+        entry.pseudorange_valid ? static_cast<double>(pseudorange_raw) / 128.0 : -1.0;
+    entry.carrier_phase_cycles =
+        entry.carrier_phase_valid ? static_cast<double>(carrier_phase_raw) / 256.0 : -1.0;
+    entry.pseudorange_std_m =
+        entry.pseudorange_valid ? obsvmcmp_psr_std_m(pseudorange_std_index) : -1.0;
+    entry.carrier_phase_std_cycles =
+        entry.carrier_phase_valid
+            ? (static_cast<double>(carrier_phase_std_index) + 1.0) / 512.0
+            : -1.0;
+    entry.lock_time_sec = static_cast<double>(lock_time_raw) / 32.0;
+    // N4 R1.4 documents C/N0 as 20 + n, but zero-filled entries are common
+    // in compressed observation captures. Treat an encoded zero as "not
+    // available" so survey summaries ignore placeholder values.
+    entry.cn0_db_hz = cn0_raw == 0U ? 0.0 : 20.0 + static_cast<double>(cn0_raw);
+    sentence.raw_observations->entries.push_back(entry);
+  }
+
   return sentence;
 }
 

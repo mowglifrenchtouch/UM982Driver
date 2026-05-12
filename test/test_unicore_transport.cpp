@@ -168,6 +168,18 @@ TEST(UnicoreBinaryDispatcher, RecordsUnknownMessageIds)
   EXPECT_EQ(counters.recent_unknown_message_ids.front(), 65000U);
 }
 
+TEST(UnicoreBinaryDispatcher, RecognizesObsvmcmpMessageId)
+{
+  UnicoreBinaryDispatcher dispatcher;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 138U;
+
+  const auto result = dispatcher.dispatch(frame);
+
+  EXPECT_TRUE(result.known_message);
+  EXPECT_EQ(result.message_name, "OBSVMCMP");
+}
+
 TEST(UnicoreTransport, KeepsAsciiPathWhenBinaryDisabled)
 {
   UnicoreTransport transport({false, true, 256U});
@@ -180,6 +192,23 @@ TEST(UnicoreTransport, KeepsAsciiPathWhenBinaryDisabled)
   EXPECT_EQ(events[0].kind, UnicoreTransportEventKind::kAsciiLine);
   EXPECT_EQ(events[0].ascii_line, "$GPHDT,123.4,T*31");
   EXPECT_EQ(transport.binary_counters().frames_total, 0U);
+}
+
+TEST(UnicoreTransport, ExtractsLargeObsvmcmpFrameBelowConfiguredLimit)
+{
+  UnicoreTransport transport({true, true, 2048U});
+  std::vector<uint8_t> payload(4U + 24U * 50U, 0x00U);
+  payload[0] = 50U;
+  const std::string frame = make_binary_frame(138U, payload);
+
+  transport.append(reinterpret_cast<const uint8_t*>(frame.data()), frame.size());
+  const auto events = transport.drain();
+
+  ASSERT_EQ(events.size(), 1U);
+  ASSERT_TRUE(events[0].binary_frame.has_value());
+  EXPECT_EQ(events[0].binary_frame->message_id, 138U);
+  EXPECT_EQ(events[0].binary_frame->payload_length, payload.size());
+  EXPECT_TRUE(events[0].binary_frame->crc_valid);
 }
 
 }  // namespace mowgli_unicore_gnss
