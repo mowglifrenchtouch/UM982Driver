@@ -18,9 +18,14 @@ public:
   std::optional<ParsedSentence> parse(const UnicoreBinaryFrame& frame) const;
 
 private:
+  static std::optional<ParsedSentence> parse_agcb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_bestsatb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_bestnavb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_freqjamstatusb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_hwstatusb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_jamstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_pvtslnb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_rtkstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_rtcmstatusb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_satsinfob(const UnicoreBinaryFrame& frame);
 };

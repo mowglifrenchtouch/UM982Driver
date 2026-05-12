@@ -75,6 +75,11 @@ void append_le16(std::vector<uint8_t>& out, uint16_t value)
   out.push_back(static_cast<uint8_t>((value >> 8U) & 0xFFU));
 }
 
+void append_i16(std::vector<uint8_t>& out, int16_t value)
+{
+  append_le16(out, static_cast<uint16_t>(value));
+}
+
 void append_le32(std::vector<uint8_t>& out, uint32_t value)
 {
   out.push_back(static_cast<uint8_t>(value & 0xFFU));
@@ -349,6 +354,92 @@ std::vector<uint8_t> make_rtcmstatusb_payload()
   return payload;
 }
 
+std::vector<uint8_t> make_rtkstatusb_payload()
+{
+  std::vector<uint8_t> payload;
+  payload.reserve(56U);
+  append_le32(payload, 0x0000000FU);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x00000003U);
+  append_le32(payload, 0x00000000U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x00000007U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x00000001U);
+  append_le32(payload, 0x00000000U);
+  append_le32(payload, 0x00000000U);
+  append_le32(payload, 0U);
+  append_le32(payload, 34U);  // NARROW_FLOAT
+  append_le32(payload, 5U);
+  append_le8(payload, 2U);
+  append_le8(payload, 1U);
+  append_le8(payload, 24U);
+  append_le8(payload, 0U);
+  return payload;
+}
+
+std::vector<uint8_t> make_agcb_payload()
+{
+  std::vector<uint8_t> payload;
+  payload.reserve(20U);
+  append_i16(payload, 44);
+  append_i16(payload, 46);
+  append_i16(payload, 63);
+  append_i16(payload, -1);
+  append_i16(payload, -1);
+  append_i16(payload, 41);
+  append_i16(payload, 1);
+  append_i16(payload, 0);
+  append_i16(payload, -1);
+  append_i16(payload, -1);
+  return payload;
+}
+
+std::vector<uint8_t> make_hwstatusb_payload()
+{
+  std::vector<uint8_t> payload;
+  payload.reserve(40U);
+  append_le32(payload, 66807U);
+  append_float32(payload, 0.920F);
+  append_float32(payload, 1.020F);
+  append_float32(payload, 0.908F);
+  append_le32(payload, 1U);
+  append_float32(payload, -0.693F);
+  append_float32(payload, 0.0F);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le16(payload, 0x0377U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0U);
+  return payload;
+}
+
+std::vector<uint8_t> make_jamstatusb_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, 16U);  // SINGLE
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  return payload;
+}
+
+std::vector<uint8_t> make_freqjamstatusb_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, 16U);  // SINGLE
+  append_le8(payload, 255U);
+  append_le8(payload, 2U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  return payload;
+}
+
 double mean_cn0(const SatsInfoData& data)
 {
   double sum = 0.0;
@@ -498,6 +589,107 @@ TEST(UnicoreBinaryNavParser, ParsesRtcmstatusbPayload)
   EXPECT_EQ(parsed->rtcm_status->observable_count[5], 21);
 }
 
+TEST(UnicoreBinaryNavParser, ParsesRtkstatusbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 509U;
+  frame.payload = make_rtkstatusb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->rtk_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "RTKSTATUSB");
+  EXPECT_EQ(parsed->rtk_status->gps_source_mask, 0x0000000FU);
+  EXPECT_EQ(parsed->rtk_status->bds_source_mask_1, 0x00000003U);
+  EXPECT_EQ(parsed->rtk_status->glonass_source_mask, 0x00000007U);
+  EXPECT_EQ(parsed->rtk_status->galileo_source_mask_1, 0x00000001U);
+  EXPECT_EQ(parsed->rtk_status->position_type, "NARROW_FLOAT");
+  EXPECT_EQ(parsed->rtk_status->fix_quality, 5);
+  EXPECT_EQ(parsed->rtk_status->calculate_status, 5);
+  EXPECT_EQ(parsed->rtk_status->ion_detected, 2);
+  EXPECT_EQ(parsed->rtk_status->dual_rtk_flag, 1);
+  EXPECT_EQ(parsed->rtk_status->adr_observation_count, 24);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesAgcbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 220U;
+  frame.payload = make_agcb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->agc.has_value());
+  EXPECT_EQ(parsed->sentence_type, "AGCB");
+  EXPECT_EQ(parsed->agc->antenna1[0], 44);
+  EXPECT_EQ(parsed->agc->antenna1[1], 46);
+  EXPECT_EQ(parsed->agc->antenna1[2], 63);
+  EXPECT_EQ(parsed->agc->antenna2[0], 41);
+  EXPECT_EQ(parsed->agc->antenna2[1], 1);
+  EXPECT_EQ(parsed->agc->antenna2[2], 0);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesHwstatusbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 218U;
+  frame.payload = make_hwstatusb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->hw_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "HWSTATUSB");
+  EXPECT_NEAR(parsed->hw_status->dc09_v, 0.920, 1e-6);
+  EXPECT_NEAR(parsed->hw_status->dc10_v, 1.020, 1e-6);
+  EXPECT_NEAR(parsed->hw_status->dc18_v, 0.908, 1e-6);
+  EXPECT_EQ(parsed->hw_status->clock_flag, 1);
+  EXPECT_NEAR(parsed->hw_status->clock_drift_mps, -0.693, 1e-6);
+  EXPECT_EQ(parsed->hw_status->hw_flag, 0x00);
+  EXPECT_EQ(parsed->hw_status->pll_lock, 0x0377);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesJamstatusbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 511U;
+  frame.payload = make_jamstatusb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->jam_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "JAMSTATUSB");
+  EXPECT_EQ(parsed->jam_status->position_type, "SINGLE");
+  EXPECT_EQ(parsed->jam_status->cw_ratio, 0);
+  EXPECT_EQ(parsed->jam_status->cw_flag, 0);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesFreqjamstatusbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 519U;
+  frame.payload = make_freqjamstatusb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->freq_jam_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "FREQJAMSTATUSB");
+  EXPECT_EQ(parsed->freq_jam_status->position_type, "SINGLE");
+  EXPECT_EQ(parsed->freq_jam_status->cw_ratio[0], 255);
+  EXPECT_EQ(parsed->freq_jam_status->cw_flag[0], 2);
+  EXPECT_EQ(parsed->freq_jam_status->cw_ratio[1], 0);
+  EXPECT_EQ(parsed->freq_jam_status->cw_flag[2], 0);
+}
+
 TEST(UnicoreBinaryNavParser, HybridSamplesMatchAsciiWithinTolerance)
 {
   Um982Parser ascii_parser;
@@ -593,6 +785,68 @@ TEST(UnicoreBinaryNavParser, HybridSatelliteAndRtcmSamplesMatchAsciiWithinTolera
   EXPECT_EQ(binary_rtcm->rtcm_status->satellite_count, ascii_rtcm->rtcm_status->satellite_count);
 }
 
+TEST(UnicoreBinaryNavParser, HybridRtkRfHardwareJammingSamplesMatchAscii)
+{
+  Um982Parser ascii_parser;
+  UnicoreBinaryNavParser binary_parser;
+
+  const auto ascii_rtk = ascii_parser.parse_line(make_unicore_ascii(
+      "RTKSTATUSA,97,GPS,FINE,2190,365354000,0,0,18,1;0000000F,0,00000003,00000000,0,00000007,0,"
+      "00000001,00000000,00000000,0,NARROW_FLOAT,5,2,1,24,0"));
+  const auto ascii_agc = ascii_parser.parse_line(make_unicore_ascii(
+      "AGCA,65,GPS,FINE,2190,375570000,0,0,18,37;44,46,63,-1,-1,41,1,0,-1,-1"));
+  const auto ascii_hw = ascii_parser.parse_line(make_unicore_ascii(
+      "HWSTATUSA,97,GPS,FINE,2221,111183000,0,0,18,15;66807,0.920,1.020,0.908,1,-0.693,0.0,0x00,0,0x0377,0,0"));
+  const auto ascii_jam = ascii_parser.parse_line(make_unicore_ascii(
+      "JAMSTATUSA,97,GPS,FINE,2190,365412000,0,0,18,14;SINGLE,0,0,0,0"));
+  const auto ascii_freq_jam = ascii_parser.parse_line(make_unicore_ascii(
+      "FREQJAMSTATUSA,97,GPS,FINE,2164,559464000,0,0,18,8;SINGLE,255,2,0,0,0,0,0,0"));
+
+  UnicoreBinaryFrame rtk_frame;
+  rtk_frame.message_id = 509U;
+  rtk_frame.payload = make_rtkstatusb_payload();
+  UnicoreBinaryFrame agc_frame;
+  agc_frame.message_id = 220U;
+  agc_frame.payload = make_agcb_payload();
+  UnicoreBinaryFrame hw_frame;
+  hw_frame.message_id = 218U;
+  hw_frame.payload = make_hwstatusb_payload();
+  UnicoreBinaryFrame jam_frame;
+  jam_frame.message_id = 511U;
+  jam_frame.payload = make_jamstatusb_payload();
+  UnicoreBinaryFrame freq_jam_frame;
+  freq_jam_frame.message_id = 519U;
+  freq_jam_frame.payload = make_freqjamstatusb_payload();
+
+  const auto binary_rtk = binary_parser.parse(rtk_frame);
+  const auto binary_agc = binary_parser.parse(agc_frame);
+  const auto binary_hw = binary_parser.parse(hw_frame);
+  const auto binary_jam = binary_parser.parse(jam_frame);
+  const auto binary_freq_jam = binary_parser.parse(freq_jam_frame);
+
+  ASSERT_TRUE(ascii_rtk.has_value() && ascii_rtk->rtk_status.has_value());
+  ASSERT_TRUE(ascii_agc.has_value() && ascii_agc->agc.has_value());
+  ASSERT_TRUE(ascii_hw.has_value() && ascii_hw->hw_status.has_value());
+  ASSERT_TRUE(ascii_jam.has_value() && ascii_jam->jam_status.has_value());
+  ASSERT_TRUE(ascii_freq_jam.has_value() && ascii_freq_jam->freq_jam_status.has_value());
+  ASSERT_TRUE(binary_rtk.has_value() && binary_rtk->rtk_status.has_value());
+  ASSERT_TRUE(binary_agc.has_value() && binary_agc->agc.has_value());
+  ASSERT_TRUE(binary_hw.has_value() && binary_hw->hw_status.has_value());
+  ASSERT_TRUE(binary_jam.has_value() && binary_jam->jam_status.has_value());
+  ASSERT_TRUE(binary_freq_jam.has_value() && binary_freq_jam->freq_jam_status.has_value());
+
+  EXPECT_EQ(binary_rtk->rtk_status->gps_source_mask, ascii_rtk->rtk_status->gps_source_mask);
+  EXPECT_EQ(binary_rtk->rtk_status->position_type, ascii_rtk->rtk_status->position_type);
+  EXPECT_EQ(binary_rtk->rtk_status->adr_observation_count,
+            ascii_rtk->rtk_status->adr_observation_count);
+  EXPECT_EQ(binary_agc->agc->antenna1[0], ascii_agc->agc->antenna1[0]);
+  EXPECT_EQ(binary_agc->agc->antenna2[0], ascii_agc->agc->antenna2[0]);
+  EXPECT_NEAR(binary_hw->hw_status->clock_drift_mps, ascii_hw->hw_status->clock_drift_mps, 1e-6);
+  EXPECT_EQ(binary_hw->hw_status->pll_lock, ascii_hw->hw_status->pll_lock);
+  EXPECT_EQ(binary_jam->jam_status->cw_flag, ascii_jam->jam_status->cw_flag);
+  EXPECT_EQ(binary_freq_jam->freq_jam_status->cw_ratio[0], ascii_freq_jam->freq_jam_status->cw_ratio[0]);
+}
+
 TEST(UnicoreBinaryNavParser, RejectsTruncatedSatelliteAndRtcmPayloads)
 {
   UnicoreBinaryNavParser parser;
@@ -614,6 +868,41 @@ TEST(UnicoreBinaryNavParser, RejectsTruncatedSatelliteAndRtcmPayloads)
   rtcm_frame.payload = make_rtcmstatusb_payload();
   rtcm_frame.payload.resize(20U);
   EXPECT_FALSE(parser.parse(rtcm_frame).has_value());
+}
+
+TEST(UnicoreBinaryNavParser, RejectsTruncatedRtkRfHardwareAndJammingPayloads)
+{
+  UnicoreBinaryNavParser parser;
+
+  UnicoreBinaryFrame rtk_frame;
+  rtk_frame.message_id = 509U;
+  rtk_frame.payload = make_rtkstatusb_payload();
+  rtk_frame.payload.resize(55U);
+  EXPECT_FALSE(parser.parse(rtk_frame).has_value());
+
+  UnicoreBinaryFrame agc_frame;
+  agc_frame.message_id = 220U;
+  agc_frame.payload = make_agcb_payload();
+  agc_frame.payload.resize(18U);
+  EXPECT_FALSE(parser.parse(agc_frame).has_value());
+
+  UnicoreBinaryFrame hw_frame;
+  hw_frame.message_id = 218U;
+  hw_frame.payload = make_hwstatusb_payload();
+  hw_frame.payload.resize(36U);
+  EXPECT_FALSE(parser.parse(hw_frame).has_value());
+
+  UnicoreBinaryFrame jam_frame;
+  jam_frame.message_id = 511U;
+  jam_frame.payload = make_jamstatusb_payload();
+  jam_frame.payload.resize(6U);
+  EXPECT_FALSE(parser.parse(jam_frame).has_value());
+
+  UnicoreBinaryFrame freq_jam_frame;
+  freq_jam_frame.message_id = 519U;
+  freq_jam_frame.payload = make_freqjamstatusb_payload();
+  freq_jam_frame.payload.resize(10U);
+  EXPECT_FALSE(parser.parse(freq_jam_frame).has_value());
 }
 
 TEST(UnicoreBinaryNavParser, TransportRejectsBadCrcBeforeParsing)

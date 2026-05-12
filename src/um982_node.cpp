@@ -540,8 +540,12 @@ public:
     use_binary_nav_ = declare_parameter<bool>("use_binary_nav", false);
     binary_compare_ascii_ = declare_parameter<bool>("binary_compare_ascii", true);
     binary_nav_timeout_sec_ = declare_parameter<double>("binary_nav_timeout_sec", 2.0);
+    use_binary_rtk_diag_ = declare_parameter<bool>("use_binary_rtk_diag", false);
     use_binary_satellite_diag_ = declare_parameter<bool>("use_binary_satellite_diag", false);
     use_binary_rtcm_diag_ = declare_parameter<bool>("use_binary_rtcm_diag", false);
+    use_binary_rf_diag_ = declare_parameter<bool>("use_binary_rf_diag", false);
+    use_binary_hw_diag_ = declare_parameter<bool>("use_binary_hw_diag", false);
+    use_binary_jamming_diag_ = declare_parameter<bool>("use_binary_jamming_diag", false);
     transport_.set_options(
         {enable_unicore_binary_, binary_parser_strict_crc_, binary_max_frame_size_});
 
@@ -569,8 +573,9 @@ public:
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
                 "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs "
                 "binary=%s strict_crc=%s binary_max_frame=%zu use_binary_nav=%s "
-                "use_binary_satellite_diag=%s use_binary_rtcm_diag=%s compare_ascii=%s "
-                "binary_nav_timeout=%.1fs",
+                "use_binary_rtk_diag=%s use_binary_satellite_diag=%s use_binary_rtcm_diag=%s "
+                "use_binary_rf_diag=%s use_binary_hw_diag=%s use_binary_jamming_diag=%s "
+                "compare_ascii=%s binary_nav_timeout=%.1fs",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
@@ -583,8 +588,12 @@ public:
                 binary_parser_strict_crc_ ? "true" : "false",
                 binary_max_frame_size_,
                 use_binary_nav_ ? "true" : "false",
+                use_binary_rtk_diag_ ? "true" : "false",
                 use_binary_satellite_diag_ ? "true" : "false",
                 use_binary_rtcm_diag_ ? "true" : "false",
+                use_binary_rf_diag_ ? "true" : "false",
+                use_binary_hw_diag_ ? "true" : "false",
+                use_binary_jamming_diag_ ? "true" : "false",
                 binary_compare_ascii_ ? "true" : "false",
                 binary_nav_timeout_sec_);
   }
@@ -848,6 +857,11 @@ private:
       latest_binary_bestnav_ = TimedData<BestNavData>{*parsed->bestnav, received_at};
     }
 
+    if (parsed->rtk_status.has_value())
+    {
+      latest_binary_rtk_status_ = TimedData<RtkStatusData>{*parsed->rtk_status, received_at};
+    }
+
     if (parsed->rtcm_status.has_value())
     {
       latest_binary_rtcm_status_ = TimedData<RtcmStatusData>{*parsed->rtcm_status, received_at};
@@ -869,6 +883,27 @@ private:
     if (parsed->satsinfo.has_value())
     {
       latest_binary_satsinfo_ = TimedData<SatsInfoData>{*parsed->satsinfo, received_at};
+    }
+
+    if (parsed->agc.has_value())
+    {
+      latest_binary_agc_ = TimedData<AgcData>{*parsed->agc, received_at};
+    }
+
+    if (parsed->hw_status.has_value())
+    {
+      latest_binary_hw_status_ = TimedData<HwStatusData>{*parsed->hw_status, received_at};
+    }
+
+    if (parsed->jam_status.has_value())
+    {
+      latest_binary_jam_status_ = TimedData<JamStatusData>{*parsed->jam_status, received_at};
+    }
+
+    if (parsed->freq_jam_status.has_value())
+    {
+      latest_binary_freq_jam_status_ =
+          TimedData<FreqJamStatusData>{*parsed->freq_jam_status, received_at};
     }
   }
 
@@ -920,7 +955,7 @@ private:
     return active_ascii_bestnav();
   }
 
-  std::optional<RtkStatusData> active_rtk_status() const
+  std::optional<RtkStatusData> active_ascii_rtk_status() const
   {
     if (latest_rtk_status_.has_value() &&
         is_fresh(latest_rtk_status_->received_at, rtcm_timeout_sec_))
@@ -928,6 +963,28 @@ private:
       return latest_rtk_status_->data;
     }
     return std::nullopt;
+  }
+
+  std::optional<RtkStatusData> active_binary_rtk_status() const
+  {
+    if (latest_binary_rtk_status_.has_value() &&
+        is_fresh(latest_binary_rtk_status_->received_at, rtcm_timeout_sec_))
+    {
+      return latest_binary_rtk_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RtkStatusData> active_rtk_status() const
+  {
+    if (use_binary_rtk_diag_)
+    {
+      if (const auto binary = active_binary_rtk_status(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_rtk_status();
   }
 
   std::optional<RtcmStatusData> active_ascii_rtcm_status() const
@@ -1026,7 +1083,7 @@ private:
     return active_ascii_satsinfo();
   }
 
-  std::optional<AgcData> active_agc() const
+  std::optional<AgcData> active_ascii_agc() const
   {
     if (latest_agc_.has_value() && is_fresh(latest_agc_->received_at, rf_diag_timeout_sec_))
     {
@@ -1035,7 +1092,29 @@ private:
     return std::nullopt;
   }
 
-  std::optional<HwStatusData> active_hw_status() const
+  std::optional<AgcData> active_binary_agc() const
+  {
+    if (latest_binary_agc_.has_value() &&
+        is_fresh(latest_binary_agc_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_binary_agc_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<AgcData> active_agc() const
+  {
+    if (use_binary_rf_diag_)
+    {
+      if (const auto binary = active_binary_agc(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_agc();
+  }
+
+  std::optional<HwStatusData> active_ascii_hw_status() const
   {
     if (latest_hw_status_.has_value() &&
         is_fresh(latest_hw_status_->received_at, rf_diag_timeout_sec_))
@@ -1045,7 +1124,29 @@ private:
     return std::nullopt;
   }
 
-  std::optional<JamStatusData> active_jam_status() const
+  std::optional<HwStatusData> active_binary_hw_status() const
+  {
+    if (latest_binary_hw_status_.has_value() &&
+        is_fresh(latest_binary_hw_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_binary_hw_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<HwStatusData> active_hw_status() const
+  {
+    if (use_binary_hw_diag_)
+    {
+      if (const auto binary = active_binary_hw_status(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_hw_status();
+  }
+
+  std::optional<JamStatusData> active_ascii_jam_status() const
   {
     if (latest_jam_status_.has_value() &&
         is_fresh(latest_jam_status_->received_at, rf_diag_timeout_sec_))
@@ -1055,7 +1156,29 @@ private:
     return std::nullopt;
   }
 
-  std::optional<FreqJamStatusData> active_freq_jam_status() const
+  std::optional<JamStatusData> active_binary_jam_status() const
+  {
+    if (latest_binary_jam_status_.has_value() &&
+        is_fresh(latest_binary_jam_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_binary_jam_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<JamStatusData> active_jam_status() const
+  {
+    if (use_binary_jamming_diag_)
+    {
+      if (const auto binary = active_binary_jam_status(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_jam_status();
+  }
+
+  std::optional<FreqJamStatusData> active_ascii_freq_jam_status() const
   {
     if (latest_freq_jam_status_.has_value() &&
         is_fresh(latest_freq_jam_status_->received_at, rf_diag_timeout_sec_))
@@ -1063,6 +1186,28 @@ private:
       return latest_freq_jam_status_->data;
     }
     return std::nullopt;
+  }
+
+  std::optional<FreqJamStatusData> active_binary_freq_jam_status() const
+  {
+    if (latest_binary_freq_jam_status_.has_value() &&
+        is_fresh(latest_binary_freq_jam_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_binary_freq_jam_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<FreqJamStatusData> active_freq_jam_status() const
+  {
+    if (use_binary_jamming_diag_)
+    {
+      if (const auto binary = active_binary_freq_jam_status(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_freq_jam_status();
   }
 
   std::optional<FixData> active_ascii_fix() const
@@ -1726,6 +1871,8 @@ private:
     const auto bestnav = active_bestnav();
     const auto binary_bestnav = active_binary_bestnav();
     const auto binary_fix = active_binary_fix();
+    const auto ascii_rtk_status = active_ascii_rtk_status();
+    const auto binary_rtk_status = active_binary_rtk_status();
     const auto rtk_status = active_rtk_status();
     const double bestnav_age =
         use_binary_nav_ && latest_binary_bestnav_.has_value()
@@ -1738,9 +1885,16 @@ private:
             : (latest_binary_bestnav_.has_value()
                    ? age_seconds(latest_binary_bestnav_->received_at)
                    : std::numeric_limits<double>::infinity());
-    const double rtkstatus_age =
+    const double ascii_rtkstatus_age =
         last_rtkstatus_time_.has_value() ? age_seconds(*last_rtkstatus_time_)
                                          : std::numeric_limits<double>::infinity();
+    const double binary_rtkstatus_age =
+        latest_binary_rtk_status_.has_value()
+            ? age_seconds(latest_binary_rtk_status_->received_at)
+            : std::numeric_limits<double>::infinity();
+    const double rtkstatus_age =
+        use_binary_rtk_diag_ && binary_rtk_status.has_value() ? binary_rtkstatus_age
+                                                              : ascii_rtkstatus_age;
     const int quality = bestnav.has_value() ? bestnav->fix_quality
                                             : (rtk_status.has_value() ? rtk_status->fix_quality : 0);
 
@@ -1753,11 +1907,17 @@ private:
     s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("binary_bestnav_available", binary_bestnav.has_value() ? "True" : "False"));
     s.values.push_back(kv("binary_pvtsln_available", binary_fix.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_rtkstatus_available", binary_rtk_status.has_value() ? "True" : "False"));
     s.values.push_back(kv("binary_nav_enabled", enable_unicore_binary_ ? "True" : "False"));
     s.values.push_back(kv("use_binary_nav", use_binary_nav_ ? "True" : "False"));
+    s.values.push_back(kv("use_binary_rtk_diag", use_binary_rtk_diag_ ? "True" : "False"));
     s.values.push_back(
         kv("binary_nav_age_s",
            std::isfinite(binary_nav_age) ? to_string_or_nan(binary_nav_age) : "inf"));
+    s.values.push_back(
+        kv("binary_rtkstatus_age_s",
+           std::isfinite(binary_rtkstatus_age) ? to_string_or_nan(binary_rtkstatus_age) : "inf"));
     s.values.push_back(
         kv("last_bestnav_age_s", std::isfinite(bestnav_age) ? to_string_or_nan(bestnav_age) : "inf"));
     s.values.push_back(kv("last_rtkstatus_age_s",
@@ -1820,10 +1980,38 @@ private:
       s.values.push_back(kv("qzss_source_mask", to_hex_word(rtk_status->qzss_source_mask)));
     }
 
+    if (binary_compare_ascii_)
+    {
+      s.values.push_back(
+          kv("binary_ascii_rtk_position_type_match",
+             (ascii_rtk_status.has_value() && binary_rtk_status.has_value() &&
+              ascii_rtk_status->position_type == binary_rtk_status->position_type)
+                 ? "True"
+                 : ((ascii_rtk_status.has_value() && binary_rtk_status.has_value()) ? "False"
+                                                                                    : "n/a")));
+      s.values.push_back(
+          kv("binary_ascii_rtk_calculate_status_delta",
+             (ascii_rtk_status.has_value() && binary_rtk_status.has_value())
+                 ? std::to_string(binary_rtk_status->calculate_status -
+                                  ascii_rtk_status->calculate_status)
+                 : "n/a"));
+      s.values.push_back(
+          kv("binary_ascii_adr_observations_delta",
+             (ascii_rtk_status.has_value() && binary_rtk_status.has_value())
+                 ? std::to_string(binary_rtk_status->adr_observation_count -
+                                  ascii_rtk_status->adr_observation_count)
+                 : "n/a"));
+    }
+
     if (!bestnav.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
       s.message = use_binary_nav_ ? "BESTNAVB stale or missing" : "BESTNAVA stale or missing";
+    }
+    else if (use_binary_rtk_diag_ && !binary_rtk_status.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RTKSTATUSB stale or missing";
     }
     else if (!rtk_status.has_value())
     {
@@ -2011,14 +2199,31 @@ private:
       return s;
     }
 
+    const auto ascii_agc = active_ascii_agc();
+    const auto binary_agc = active_binary_agc();
     const auto agc = active_agc();
-    const double agc_age = latest_agc_.has_value() ? age_seconds(latest_agc_->received_at)
-                                                   : std::numeric_limits<double>::infinity();
+    const double ascii_agc_age = latest_agc_.has_value() ? age_seconds(latest_agc_->received_at)
+                                                         : std::numeric_limits<double>::infinity();
+    const double binary_agc_age =
+        latest_binary_agc_.has_value() ? age_seconds(latest_binary_agc_->received_at)
+                                       : std::numeric_limits<double>::infinity();
+    const double agc_age =
+        use_binary_rf_diag_ && binary_agc.has_value() ? binary_agc_age : ascii_agc_age;
     const double main_mean = agc.has_value() ? mean_valid_agc(agc->antenna1)
                                              : std::numeric_limits<double>::quiet_NaN();
     const double aux_mean = agc.has_value() ? mean_valid_agc(agc->antenna2)
                                             : std::numeric_limits<double>::quiet_NaN();
     const int main_min = agc.has_value() ? min_valid_agc(agc->antenna1) : -1;
+    const double ascii_main_mean = ascii_agc.has_value() ? mean_valid_agc(ascii_agc->antenna1)
+                                                          : std::numeric_limits<double>::quiet_NaN();
+    const double ascii_aux_mean = ascii_agc.has_value() ? mean_valid_agc(ascii_agc->antenna2)
+                                                        : std::numeric_limits<double>::quiet_NaN();
+    const double binary_main_mean =
+        binary_agc.has_value() ? mean_valid_agc(binary_agc->antenna1)
+                               : std::numeric_limits<double>::quiet_NaN();
+    const double binary_aux_mean =
+        binary_agc.has_value() ? mean_valid_agc(binary_agc->antenna2)
+                               : std::numeric_limits<double>::quiet_NaN();
 
     // Heuristic only: the manual says weak/open-circuit conditions drive
     // AGC upward, while interference/noise-floor rise drives AGC downward.
@@ -2031,8 +2236,13 @@ private:
                                            diagnostic_feed_state(true, agc.has_value()))));
     s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("agc_available", agc.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_rf_available", binary_agc.has_value() ? "True" : "False"));
+    s.values.push_back(kv("use_binary_rf_diag", use_binary_rf_diag_ ? "True" : "False"));
     s.values.push_back(
         kv("last_agc_age_s", std::isfinite(agc_age) ? to_string_or_nan(agc_age) : "inf"));
+    s.values.push_back(
+        kv("binary_rf_age_s",
+           std::isfinite(binary_agc_age) ? to_string_or_nan(binary_agc_age) : "inf"));
     s.values.push_back(kv("agc_main", agc.has_value() ? describe_agc_values(agc->antenna1) : "n/a"));
     s.values.push_back(kv("agc_aux", agc.has_value() ? describe_agc_values(agc->antenna2) : "n/a"));
     s.values.push_back(
@@ -2042,6 +2252,20 @@ private:
     s.values.push_back(kv("rf_signal_low", rf_signal_low ? "True" : "False"));
     s.values.push_back(
         kv("rf_saturation_suspected", rf_saturation_suspected ? "True" : "False"));
+
+    if (binary_compare_ascii_)
+    {
+      s.values.push_back(
+          kv("binary_ascii_agc_main_mean_delta",
+             std::isfinite(binary_main_mean) && std::isfinite(ascii_main_mean)
+                 ? to_string_or_nan(binary_main_mean - ascii_main_mean)
+                 : "n/a"));
+      s.values.push_back(
+          kv("binary_ascii_agc_aux_mean_delta",
+             std::isfinite(binary_aux_mean) && std::isfinite(ascii_aux_mean)
+                 ? to_string_or_nan(binary_aux_mean - ascii_aux_mean)
+                 : "n/a"));
+    }
 
     if (agc.has_value())
     {
@@ -2056,7 +2280,12 @@ private:
     if (!agc.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "AGCA stale or missing";
+      s.message = use_binary_rf_diag_ ? "AGCB/AGCA stale or missing" : "AGCA stale or missing";
+    }
+    else if (use_binary_rf_diag_ && !binary_agc.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "AGCB stale or missing";
     }
     else if (rf_saturation_suspected)
     {
@@ -2091,11 +2320,19 @@ private:
       return s;
     }
 
+    const auto ascii_hw = active_ascii_hw_status();
+    const auto binary_hw = active_binary_hw_status();
     const auto hw = active_hw_status();
     const auto agc = active_agc();
-    const double hw_age = latest_hw_status_.has_value()
-                              ? age_seconds(latest_hw_status_->received_at)
-                              : std::numeric_limits<double>::infinity();
+    const double ascii_hw_age = latest_hw_status_.has_value()
+                                    ? age_seconds(latest_hw_status_->received_at)
+                                    : std::numeric_limits<double>::infinity();
+    const double binary_hw_age =
+        latest_binary_hw_status_.has_value()
+            ? age_seconds(latest_binary_hw_status_->received_at)
+            : std::numeric_limits<double>::infinity();
+    const double hw_age =
+        use_binary_hw_diag_ && binary_hw.has_value() ? binary_hw_age : ascii_hw_age;
 
     const bool dc09_ok = hw.has_value() && voltage_in_range(hw->dc09_v, 0.85, 1.00);
     const bool dc10_ok = hw.has_value() && voltage_in_range(hw->dc10_v, 0.95, 1.10);
@@ -2113,7 +2350,13 @@ private:
     s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("hwstatus_available", hw.has_value() ? "True" : "False"));
     s.values.push_back(
+        kv("binary_hwstatus_available", binary_hw.has_value() ? "True" : "False"));
+    s.values.push_back(kv("use_binary_hw_diag", use_binary_hw_diag_ ? "True" : "False"));
+    s.values.push_back(
         kv("last_hwstatus_age_s", std::isfinite(hw_age) ? to_string_or_nan(hw_age) : "inf"));
+    s.values.push_back(
+        kv("binary_hwstatus_age_s",
+           std::isfinite(binary_hw_age) ? to_string_or_nan(binary_hw_age) : "inf"));
     s.values.push_back(kv("hardware_ok", hardware_ok ? "True" : "False"));
     s.values.push_back(kv("antenna_status", describe_antenna_status(agc)));
 
@@ -2136,10 +2379,31 @@ private:
       s.values.push_back(kv("pll_status", "n/a"));
     }
 
+    if (binary_compare_ascii_)
+    {
+      s.values.push_back(
+          kv("binary_ascii_clock_drift_delta_mps",
+             (ascii_hw.has_value() && binary_hw.has_value())
+                 ? to_string_or_nan(binary_hw->clock_drift_mps - ascii_hw->clock_drift_mps)
+                 : "n/a"));
+      s.values.push_back(
+          kv("binary_ascii_hw_flag_match",
+             (ascii_hw.has_value() && binary_hw.has_value() &&
+              ascii_hw->hw_flag == binary_hw->hw_flag)
+                 ? "True"
+                 : ((ascii_hw.has_value() && binary_hw.has_value()) ? "False" : "n/a")));
+    }
+
     if (!hw.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "HWSTATUSA stale or missing";
+      s.message =
+          use_binary_hw_diag_ ? "HWSTATUSB/HWSTATUSA stale or missing" : "HWSTATUSA stale or missing";
+    }
+    else if (use_binary_hw_diag_ && !binary_hw.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "HWSTATUSB stale or missing";
     }
     else if (!voltages_ok)
     {
@@ -2179,14 +2443,32 @@ private:
       return s;
     }
 
+    const auto ascii_jam = active_ascii_jam_status();
+    const auto binary_jam = active_binary_jam_status();
     const auto jam = active_jam_status();
+    const auto ascii_freq_jam = active_ascii_freq_jam_status();
+    const auto binary_freq_jam = active_binary_freq_jam_status();
     const auto freq_jam = active_freq_jam_status();
-    const double jam_age = latest_jam_status_.has_value()
-                               ? age_seconds(latest_jam_status_->received_at)
-                               : std::numeric_limits<double>::infinity();
-    const double freq_age = latest_freq_jam_status_.has_value()
-                                ? age_seconds(latest_freq_jam_status_->received_at)
-                                : std::numeric_limits<double>::infinity();
+    const double ascii_jam_age = latest_jam_status_.has_value()
+                                     ? age_seconds(latest_jam_status_->received_at)
+                                     : std::numeric_limits<double>::infinity();
+    const double binary_jam_age =
+        latest_binary_jam_status_.has_value()
+            ? age_seconds(latest_binary_jam_status_->received_at)
+            : std::numeric_limits<double>::infinity();
+    const double jam_age =
+        use_binary_jamming_diag_ && binary_jam.has_value() ? binary_jam_age : ascii_jam_age;
+    const double ascii_freq_age = latest_freq_jam_status_.has_value()
+                                      ? age_seconds(latest_freq_jam_status_->received_at)
+                                      : std::numeric_limits<double>::infinity();
+    const double binary_freq_age =
+        latest_binary_freq_jam_status_.has_value()
+            ? age_seconds(latest_binary_freq_jam_status_->received_at)
+            : std::numeric_limits<double>::infinity();
+    const double freq_age = use_binary_jamming_diag_ && binary_freq_jam.has_value()
+                                ? binary_freq_age
+                                : ascii_freq_age;
+    const double binary_jamming_age = std::min(binary_jam_age, binary_freq_age);
 
     int strongest_flag = jam.has_value() ? jam->cw_flag : -1;
     int strongest_ratio = jam.has_value() ? jam->cw_ratio : -1;
@@ -2215,10 +2497,27 @@ private:
     s.values.push_back(kv("jamstatus_available", jam.has_value() ? "True" : "False"));
     s.values.push_back(
         kv("freqjamstatus_available", freq_jam.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_jamming_available",
+                          (binary_jam.has_value() || binary_freq_jam.has_value()) ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_jamstatus_available", binary_jam.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_freqjamstatus_available", binary_freq_jam.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("use_binary_jamming_diag", use_binary_jamming_diag_ ? "True" : "False"));
     s.values.push_back(
         kv("last_jamstatus_age_s", std::isfinite(jam_age) ? to_string_or_nan(jam_age) : "inf"));
     s.values.push_back(kv("last_freqjamstatus_age_s",
                           std::isfinite(freq_age) ? to_string_or_nan(freq_age) : "inf"));
+    s.values.push_back(kv("binary_jamming_age_s",
+                          std::isfinite(binary_jamming_age) ? to_string_or_nan(binary_jamming_age)
+                                                            : "inf"));
+    s.values.push_back(
+        kv("binary_jamstatus_age_s",
+           std::isfinite(binary_jam_age) ? to_string_or_nan(binary_jam_age) : "inf"));
+    s.values.push_back(
+        kv("binary_freqjamstatus_age_s",
+           std::isfinite(binary_freq_age) ? to_string_or_nan(binary_freq_age) : "inf"));
     s.values.push_back(kv("jamming_detected", jamming_detected ? "True" : "False"));
     s.values.push_back(kv("jam_level", describe_jam_flag(strongest_flag)));
     s.values.push_back(kv("jam_ratio_max", strongest_ratio >= 0 ? std::to_string(strongest_ratio) : "n/a"));
@@ -2241,10 +2540,37 @@ private:
       s.values.push_back(kv("jam_l5_flag", describe_jam_flag(freq_jam->cw_flag[2])));
     }
 
+    if (binary_compare_ascii_)
+    {
+      s.values.push_back(
+          kv("binary_ascii_jam_flag_match",
+             (ascii_jam.has_value() && binary_jam.has_value() &&
+              ascii_jam->cw_flag == binary_jam->cw_flag)
+                 ? "True"
+                 : ((ascii_jam.has_value() && binary_jam.has_value()) ? "False" : "n/a")));
+      s.values.push_back(
+          kv("binary_ascii_jam_ratio_delta",
+             (ascii_jam.has_value() && binary_jam.has_value())
+                 ? std::to_string(binary_jam->cw_ratio - ascii_jam->cw_ratio)
+                 : "n/a"));
+      s.values.push_back(
+          kv("binary_ascii_l1_jam_flag_match",
+             (ascii_freq_jam.has_value() && binary_freq_jam.has_value() &&
+              ascii_freq_jam->cw_flag[0] == binary_freq_jam->cw_flag[0])
+                 ? "True"
+                 : ((ascii_freq_jam.has_value() && binary_freq_jam.has_value()) ? "False" : "n/a")));
+    }
+
     if (!jam.has_value() && !freq_jam.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "JAMSTATUSA/FREQJAMSTATUSA stale or missing";
+      s.message = use_binary_jamming_diag_ ? "JAMSTATUSB/FREQJAMSTATUSB stale or missing"
+                                           : "JAMSTATUSA/FREQJAMSTATUSA stale or missing";
+    }
+    else if (use_binary_jamming_diag_ && !binary_jam.has_value() && !binary_freq_jam.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "JAMSTATUSB/FREQJAMSTATUSB stale or missing";
     }
     else if (strongest_flag >= 2)
     {
@@ -2416,8 +2742,12 @@ private:
   bool use_binary_nav_{false};
   bool binary_compare_ascii_{true};
   double binary_nav_timeout_sec_{2.0};
+  bool use_binary_rtk_diag_{false};
   bool use_binary_satellite_diag_{false};
   bool use_binary_rtcm_diag_{false};
+  bool use_binary_rf_diag_{false};
+  bool use_binary_hw_diag_{false};
+  bool use_binary_jamming_diag_{false};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -2448,9 +2778,14 @@ private:
   std::optional<TimedData<HeadingData>> latest_binary_heading_;
   std::optional<TimedData<VelocityData>> latest_binary_velocity_;
   std::optional<TimedData<BestNavData>> latest_binary_bestnav_;
+  std::optional<TimedData<RtkStatusData>> latest_binary_rtk_status_;
   std::optional<TimedData<RtcmStatusData>> latest_binary_rtcm_status_;
   std::optional<TimedData<BestSatData>> latest_binary_bestsat_;
   std::optional<TimedData<SatsInfoData>> latest_binary_satsinfo_;
+  std::optional<TimedData<AgcData>> latest_binary_agc_;
+  std::optional<TimedData<HwStatusData>> latest_binary_hw_status_;
+  std::optional<TimedData<JamStatusData>> latest_binary_jam_status_;
+  std::optional<TimedData<FreqJamStatusData>> latest_binary_freq_jam_status_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
   std::optional<SteadyTime> last_binary_frame_time_;

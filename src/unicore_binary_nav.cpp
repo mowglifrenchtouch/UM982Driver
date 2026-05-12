@@ -18,8 +18,13 @@ namespace
 {
 
 constexpr std::size_t kBestnavPayloadSize = 116U;
+constexpr std::size_t kAgcPayloadSize = 20U;
 constexpr std::size_t kBestsatEntrySize = 16U;
+constexpr std::size_t kFreqjamstatusPayloadSize = 12U;
+constexpr std::size_t kHwstatusPayloadSize = 40U;
+constexpr std::size_t kJamstatusPayloadSize = 8U;
 constexpr std::size_t kPvtslnMinimumPayloadSize = 140U;
+constexpr std::size_t kRtkstatusPayloadSize = 56U;
 constexpr std::size_t kRtcmstatusPayloadSize = 22U;
 constexpr std::size_t kSatsinfoMinimumPayloadSize = 6U;
 
@@ -61,6 +66,18 @@ bool read_i16(const std::vector<uint8_t>& payload, std::size_t offset, int16_t& 
   const uint16_t bits = static_cast<uint16_t>(payload[offset]) |
                         (static_cast<uint16_t>(payload[offset + 1U]) << 8U);
   value = static_cast<int16_t>(bits);
+  return true;
+}
+
+bool read_u16(const std::vector<uint8_t>& payload, std::size_t offset, uint16_t& value)
+{
+  if (!has_range(payload, offset, 2U))
+  {
+    return false;
+  }
+
+  value = static_cast<uint16_t>(payload[offset]) |
+          (static_cast<uint16_t>(payload[offset + 1U]) << 8U);
   return true;
 }
 
@@ -346,6 +363,14 @@ std::optional<ParsedSentence> UnicoreBinaryNavParser::parse(const UnicoreBinaryF
 {
   switch (frame.message_id)
   {
+    case 220U:
+      return parse_agcb(frame);
+    case 509U:
+      return parse_rtkstatusb(frame);
+    case 511U:
+      return parse_jamstatusb(frame);
+    case 519U:
+      return parse_freqjamstatusb(frame);
     case 1021U:
       return parse_pvtslnb(frame);
     case 1041U:
@@ -356,9 +381,46 @@ std::optional<ParsedSentence> UnicoreBinaryNavParser::parse(const UnicoreBinaryF
       return parse_satsinfob(frame);
     case 2125U:
       return parse_rtcmstatusb(frame);
+    case 218U:
+      return parse_hwstatusb(frame);
     default:
       return std::nullopt;
   }
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_agcb(const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kAgcPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  int16_t ant1_l1 = -1;
+  int16_t ant1_l2 = -1;
+  int16_t ant1_l5 = -1;
+  int16_t ant2_l1 = -1;
+  int16_t ant2_l2 = -1;
+  int16_t ant2_l5 = -1;
+  if (!read_i16(frame.payload, 0U, ant1_l1) ||
+      !read_i16(frame.payload, 2U, ant1_l2) ||
+      !read_i16(frame.payload, 4U, ant1_l5) ||
+      !read_i16(frame.payload, 10U, ant2_l1) ||
+      !read_i16(frame.payload, 12U, ant2_l2) ||
+      !read_i16(frame.payload, 14U, ant2_l5))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "AGCB";
+  sentence.agc = AgcData{};
+  sentence.agc->antenna1 = {static_cast<int>(ant1_l1),
+                            static_cast<int>(ant1_l2),
+                            static_cast<int>(ant1_l5)};
+  sentence.agc->antenna2 = {static_cast<int>(ant2_l1),
+                            static_cast<int>(ant2_l2),
+                            static_cast<int>(ant2_l5)};
+  return sentence;
 }
 
 std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_bestsatb(const UnicoreBinaryFrame& frame)
@@ -615,6 +677,164 @@ std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_pvtslnb(const Unicor
   (void)psrvel_ground;
   (void)psrvel_north;
   (void)psrvel_east;
+  return sentence;
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_freqjamstatusb(
+    const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kFreqjamstatusPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  uint32_t position_type_code = 0U;
+  std::array<uint8_t, 3> cw_ratio{{0U, 0U, 0U}};
+  std::array<uint8_t, 3> cw_flag{{0U, 0U, 0U}};
+  if (!read_u32(frame.payload, 0U, position_type_code) ||
+      !read_u8(frame.payload, 4U, cw_ratio[0]) ||
+      !read_u8(frame.payload, 5U, cw_flag[0]) ||
+      !read_u8(frame.payload, 6U, cw_ratio[1]) ||
+      !read_u8(frame.payload, 7U, cw_flag[1]) ||
+      !read_u8(frame.payload, 8U, cw_ratio[2]) ||
+      !read_u8(frame.payload, 9U, cw_flag[2]))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "FREQJAMSTATUSB";
+  sentence.freq_jam_status = FreqJamStatusData{};
+  sentence.freq_jam_status->position_type = position_type_name(position_type_code);
+  for (std::size_t i = 0U; i < cw_ratio.size(); ++i)
+  {
+    sentence.freq_jam_status->cw_ratio[i] = static_cast<int>(cw_ratio[i]);
+    sentence.freq_jam_status->cw_flag[i] = static_cast<int>(cw_flag[i]);
+  }
+  return sentence;
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_hwstatusb(
+    const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kHwstatusPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  double dc09_v = 0.0;
+  double dc10_v = 0.0;
+  double dc18_v = 0.0;
+  uint32_t clock_flag = 0U;
+  double clock_drift_mps = 0.0;
+  uint8_t hw_flag = 0U;
+  uint16_t pll_lock = 0U;
+  if (!read_float32(frame.payload, 4U, dc09_v) ||
+      !read_float32(frame.payload, 8U, dc10_v) ||
+      !read_float32(frame.payload, 12U, dc18_v) ||
+      !read_u32(frame.payload, 16U, clock_flag) ||
+      !read_float32(frame.payload, 20U, clock_drift_mps) ||
+      !read_u8(frame.payload, 28U, hw_flag) ||
+      !read_u16(frame.payload, 30U, pll_lock))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "HWSTATUSB";
+  sentence.hw_status = HwStatusData{};
+  sentence.hw_status->dc09_v = dc09_v;
+  sentence.hw_status->dc10_v = dc10_v;
+  sentence.hw_status->dc18_v = dc18_v;
+  sentence.hw_status->clock_flag = static_cast<int>(clock_flag);
+  sentence.hw_status->clock_drift_mps = clock_drift_mps;
+  sentence.hw_status->hw_flag = static_cast<int>(hw_flag);
+  sentence.hw_status->pll_lock = static_cast<int>(pll_lock);
+  return sentence;
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_jamstatusb(
+    const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kJamstatusPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  uint32_t position_type_code = 0U;
+  uint8_t cw_ratio = 0U;
+  uint8_t cw_flag = 0U;
+  if (!read_u32(frame.payload, 0U, position_type_code) ||
+      !read_u8(frame.payload, 4U, cw_ratio) ||
+      !read_u8(frame.payload, 5U, cw_flag))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "JAMSTATUSB";
+  sentence.jam_status = JamStatusData{};
+  sentence.jam_status->position_type = position_type_name(position_type_code);
+  sentence.jam_status->cw_ratio = static_cast<int>(cw_ratio);
+  sentence.jam_status->cw_flag = static_cast<int>(cw_flag);
+  return sentence;
+}
+
+std::optional<ParsedSentence> UnicoreBinaryNavParser::parse_rtkstatusb(
+    const UnicoreBinaryFrame& frame)
+{
+  if (frame.payload.size() < kRtkstatusPayloadSize)
+  {
+    return std::nullopt;
+  }
+
+  uint32_t gps_source_mask = 0U;
+  uint32_t bds_source_mask_1 = 0U;
+  uint32_t bds_source_mask_2 = 0U;
+  uint32_t glonass_source_mask = 0U;
+  uint32_t galileo_source_mask_1 = 0U;
+  uint32_t galileo_source_mask_2 = 0U;
+  uint32_t qzss_source_mask = 0U;
+  uint32_t position_type_code = 0U;
+  uint32_t calculate_status = 0U;
+  uint8_t ion_detected = 0U;
+  uint8_t dual_rtk_flag = 0U;
+  uint8_t adr_observation_count = 0U;
+
+  if (!read_u32(frame.payload, 0U, gps_source_mask) ||
+      !read_u32(frame.payload, 8U, bds_source_mask_1) ||
+      !read_u32(frame.payload, 12U, bds_source_mask_2) ||
+      !read_u32(frame.payload, 20U, glonass_source_mask) ||
+      !read_u32(frame.payload, 28U, galileo_source_mask_1) ||
+      !read_u32(frame.payload, 32U, galileo_source_mask_2) ||
+      !read_u32(frame.payload, 36U, qzss_source_mask) ||
+      !read_u32(frame.payload, 44U, position_type_code) ||
+      // N4 R1.4's table layout implies a 4-byte calculate-status enum at
+      // H+48 so the trailing ion/dual/ADR bytes still land at H+52..H+54.
+      !read_u32(frame.payload, 48U, calculate_status) ||
+      !read_u8(frame.payload, 52U, ion_detected) ||
+      !read_u8(frame.payload, 53U, dual_rtk_flag) ||
+      !read_u8(frame.payload, 54U, adr_observation_count))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "RTKSTATUSB";
+  sentence.rtk_status = RtkStatusData{};
+  sentence.rtk_status->gps_source_mask = gps_source_mask;
+  sentence.rtk_status->bds_source_mask_1 = bds_source_mask_1;
+  sentence.rtk_status->bds_source_mask_2 = bds_source_mask_2;
+  sentence.rtk_status->glonass_source_mask = glonass_source_mask;
+  sentence.rtk_status->galileo_source_mask_1 = galileo_source_mask_1;
+  sentence.rtk_status->galileo_source_mask_2 = galileo_source_mask_2;
+  sentence.rtk_status->qzss_source_mask = qzss_source_mask;
+  sentence.rtk_status->position_type = position_type_name(position_type_code);
+  sentence.rtk_status->fix_quality = position_type_to_gga_quality(position_type_code);
+  sentence.rtk_status->calculate_status = static_cast<int>(calculate_status);
+  sentence.rtk_status->ion_detected = static_cast<int>(ion_detected);
+  sentence.rtk_status->dual_rtk_flag = static_cast<int>(dual_rtk_flag);
+  sentence.rtk_status->adr_observation_count = static_cast<int>(adr_observation_count);
   return sentence;
 }
 

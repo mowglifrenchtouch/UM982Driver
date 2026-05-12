@@ -28,5 +28,9 @@ um982_node:
     use_binary_nav: false
     binary_compare_ascii: true
     binary_nav_timeout_sec: 2.0
+    use_binary_rtk_diag: false
     use_binary_satellite_diag: false
     use_binary_rtcm_diag: false
+    use_binary_rf_diag: false
+    use_binary_hw_diag: false
+    use_binary_jamming_diag: false
