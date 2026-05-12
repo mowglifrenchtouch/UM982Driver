@@ -304,6 +304,152 @@ std::string max_cn0_or_na(const Cn0Accumulator& acc)
   return to_string_or_nan(acc.max_db_hz);
 }
 
+std::size_t count_valid_agc_channels(const std::array<int, 3>& values)
+{
+  std::size_t count = 0U;
+  for (const int value : values)
+  {
+    if (value >= 0)
+    {
+      ++count;
+    }
+  }
+  return count;
+}
+
+double mean_valid_agc(const std::array<int, 3>& values)
+{
+  double sum = 0.0;
+  std::size_t count = 0U;
+  for (const int value : values)
+  {
+    if (value >= 0)
+    {
+      sum += static_cast<double>(value);
+      ++count;
+    }
+  }
+  if (count == 0U)
+  {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return sum / static_cast<double>(count);
+}
+
+int min_valid_agc(const std::array<int, 3>& values)
+{
+  int min_value = std::numeric_limits<int>::max();
+  bool found = false;
+  for (const int value : values)
+  {
+    if (value >= 0)
+    {
+      min_value = std::min(min_value, value);
+      found = true;
+    }
+  }
+  return found ? min_value : -1;
+}
+
+std::string describe_agc_values(const std::array<int, 3>& values)
+{
+  static const std::array<const char*, 3> kBands = {"L1", "L2", "L5"};
+  std::vector<std::string> parts;
+  for (std::size_t i = 0; i < values.size(); ++i)
+  {
+    if (values[i] >= 0)
+    {
+      parts.emplace_back(std::string(kBands[i]) + "=" + std::to_string(values[i]));
+    }
+  }
+  return join_strings(parts);
+}
+
+bool voltage_in_range(double value, double min_value, double max_value)
+{
+  return std::isfinite(value) && value >= min_value && value <= max_value;
+}
+
+std::string describe_hw_flag_bits(int hw_flag)
+{
+  if (hw_flag < 0)
+  {
+    return "n/a";
+  }
+
+  std::vector<std::string> parts;
+  parts.emplace_back((hw_flag & 0x01) != 0 ? "crystal" : "oscillator");
+  parts.emplace_back((hw_flag & 0x02) != 0 ? "tcxo" : "vcxo");
+  parts.emplace_back((hw_flag & 0x04) != 0 ? "20mhz" : "26mhz");
+  parts.emplace_back((hw_flag & 0x08) != 0 ? "osc+crystal" : "osc-only");
+  parts.emplace_back((hw_flag & 0x10) != 0 ? "external_clock" : "internal_clock");
+  parts.emplace_back((hw_flag & 0x80) != 0 ? "flag_valid" : "flag_unknown");
+  return join_strings(parts);
+}
+
+std::string describe_clock_status(int clock_flag, int hw_flag)
+{
+  if (clock_flag < 0)
+  {
+    return "n/a";
+  }
+
+  std::string status = clock_flag == 1 ? "valid" : "invalid";
+  if (hw_flag >= 0)
+  {
+    status += std::string(", ") + (((hw_flag & 0x10) != 0) ? "external" : "internal");
+  }
+  return status;
+}
+
+std::string describe_pll_status(int pll_lock)
+{
+  if (pll_lock < 0)
+  {
+    return "n/a";
+  }
+  if (pll_lock == 0)
+  {
+    return "unlocked";
+  }
+  return std::string("lock-mask=") + to_hex_word(static_cast<uint32_t>(pll_lock));
+}
+
+std::string describe_antenna_status(const std::optional<AgcData>& agc)
+{
+  if (!agc.has_value())
+  {
+    return "unknown";
+  }
+
+  const std::size_t main_valid = count_valid_agc_channels(agc->antenna1);
+  const std::size_t aux_valid = count_valid_agc_channels(agc->antenna2);
+  if (main_valid == 0U)
+  {
+    return "main invalid";
+  }
+  if (aux_valid == 0U)
+  {
+    return "main ok, aux unavailable";
+  }
+  return "main ok, aux ok";
+}
+
+std::string describe_jam_flag(int flag)
+{
+  switch (flag)
+  {
+    case 0:
+      return "none";
+    case 1:
+      return "cw_jam";
+    case 2:
+      return "strong_cw_jam";
+    default:
+      return "unknown";
+  }
+}
+
 }  // namespace
 
 class Um982Node : public rclcpp::Node
@@ -328,6 +474,10 @@ public:
     enable_satellite_status_ = declare_parameter<bool>("enable_satellite_status", true);
     enable_satsinfo_ = declare_parameter<bool>("enable_satsinfo", true);
     satellite_diag_timeout_sec_ = declare_parameter<double>("satellite_diag_timeout_sec", 5.0);
+    enable_rf_status_ = declare_parameter<bool>("enable_rf_status", true);
+    enable_hw_status_ = declare_parameter<bool>("enable_hw_status", true);
+    enable_jamming_status_ = declare_parameter<bool>("enable_jamming_status", true);
+    rf_diag_timeout_sec_ = declare_parameter<double>("rf_diag_timeout_sec", 5.0);
 
     serial_.configure(port_, baudrate_);
 
@@ -351,14 +501,15 @@ public:
 
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
-                "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs",
+                "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
                 heading_topic_.c_str(),
                 rtcm_timeout_sec_,
                 max_diff_age_sec_,
-                satellite_diag_timeout_sec_);
+                satellite_diag_timeout_sec_,
+                rf_diag_timeout_sec_);
   }
 
 private:
@@ -537,6 +688,26 @@ private:
       latest_satsinfo_ = TimedData<SatsInfoData>{*parsed->satsinfo, received_at};
     }
 
+    if (parsed->agc.has_value())
+    {
+      latest_agc_ = TimedData<AgcData>{*parsed->agc, received_at};
+    }
+
+    if (parsed->hw_status.has_value())
+    {
+      latest_hw_status_ = TimedData<HwStatusData>{*parsed->hw_status, received_at};
+    }
+
+    if (parsed->jam_status.has_value())
+    {
+      latest_jam_status_ = TimedData<JamStatusData>{*parsed->jam_status, received_at};
+    }
+
+    if (parsed->freq_jam_status.has_value())
+    {
+      latest_freq_jam_status_ = TimedData<FreqJamStatusData>{*parsed->freq_jam_status, received_at};
+    }
+
     if (parsed->gsv.has_value())
     {
       // Per-constellation satellite-in-view tally. Talker prefix
@@ -610,6 +781,45 @@ private:
         is_fresh(latest_satsinfo_->received_at, satellite_diag_timeout_sec_))
     {
       return latest_satsinfo_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<AgcData> active_agc() const
+  {
+    if (latest_agc_.has_value() && is_fresh(latest_agc_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_agc_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<HwStatusData> active_hw_status() const
+  {
+    if (latest_hw_status_.has_value() &&
+        is_fresh(latest_hw_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_hw_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<JamStatusData> active_jam_status() const
+  {
+    if (latest_jam_status_.has_value() &&
+        is_fresh(latest_jam_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_jam_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<FreqJamStatusData> active_freq_jam_status() const
+  {
+    if (latest_freq_jam_status_.has_value() &&
+        is_fresh(latest_freq_jam_status_->received_at, rf_diag_timeout_sec_))
+    {
+      return latest_freq_jam_status_->data;
     }
     return std::nullopt;
   }
@@ -1201,6 +1411,256 @@ private:
     return s;
   }
 
+  diagnostic_msgs::msg::DiagnosticStatus gps_rf_status() const
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: rf";
+    s.hardware_id = "unicore_um982";
+
+    const auto agc = active_agc();
+    const double agc_age = latest_agc_.has_value() ? age_seconds(latest_agc_->received_at)
+                                                   : std::numeric_limits<double>::infinity();
+    const double main_mean = agc.has_value() ? mean_valid_agc(agc->antenna1)
+                                             : std::numeric_limits<double>::quiet_NaN();
+    const double aux_mean = agc.has_value() ? mean_valid_agc(agc->antenna2)
+                                            : std::numeric_limits<double>::quiet_NaN();
+    const int main_min = agc.has_value() ? min_valid_agc(agc->antenna1) : -1;
+
+    // Heuristic only: the manual says weak/open-circuit conditions drive
+    // AGC upward, while interference/noise-floor rise drives AGC downward.
+    // We therefore flag large master-antenna gain as "signal low" and very
+    // small gain as a likely saturation/jamming symptom.
+    const bool rf_signal_low = std::isfinite(main_mean) && main_mean >= 80.0;
+    const bool rf_saturation_suspected = main_min >= 0 && main_min <= 10;
+
+    s.values.push_back(kv("status_enabled", enable_rf_status_ ? "True" : "False"));
+    s.values.push_back(kv("agc_available", agc.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("last_agc_age_s", std::isfinite(agc_age) ? to_string_or_nan(agc_age) : "inf"));
+    s.values.push_back(kv("agc_main", agc.has_value() ? describe_agc_values(agc->antenna1) : "n/a"));
+    s.values.push_back(kv("agc_aux", agc.has_value() ? describe_agc_values(agc->antenna2) : "n/a"));
+    s.values.push_back(
+        kv("agc_main_mean", std::isfinite(main_mean) ? to_string_or_nan(main_mean) : "n/a"));
+    s.values.push_back(
+        kv("agc_aux_mean", std::isfinite(aux_mean) ? to_string_or_nan(aux_mean) : "n/a"));
+    s.values.push_back(kv("rf_signal_low", rf_signal_low ? "True" : "False"));
+    s.values.push_back(
+        kv("rf_saturation_suspected", rf_saturation_suspected ? "True" : "False"));
+
+    if (agc.has_value())
+    {
+      s.values.push_back(kv("agc_main_l1", std::to_string(agc->antenna1[0])));
+      s.values.push_back(kv("agc_main_l2", std::to_string(agc->antenna1[1])));
+      s.values.push_back(kv("agc_main_l5", std::to_string(agc->antenna1[2])));
+      s.values.push_back(kv("agc_aux_l1", std::to_string(agc->antenna2[0])));
+      s.values.push_back(kv("agc_aux_l2", std::to_string(agc->antenna2[1])));
+      s.values.push_back(kv("agc_aux_l5", std::to_string(agc->antenna2[2])));
+    }
+
+    if (!enable_rf_status_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RF diagnostics disabled";
+    }
+    else if (!agc.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "AGCA stale or missing";
+    }
+    else if (rf_saturation_suspected)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RF saturation/interference suspected";
+    }
+    else if (rf_signal_low)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "RF signal weak or antenna gain high";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RF gain nominal";
+    }
+    return s;
+  }
+
+  diagnostic_msgs::msg::DiagnosticStatus gps_hardware_status() const
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: hardware";
+    s.hardware_id = "unicore_um982";
+
+    const auto hw = active_hw_status();
+    const auto agc = active_agc();
+    const double hw_age = latest_hw_status_.has_value()
+                              ? age_seconds(latest_hw_status_->received_at)
+                              : std::numeric_limits<double>::infinity();
+
+    const bool dc09_ok = hw.has_value() && voltage_in_range(hw->dc09_v, 0.85, 1.00);
+    const bool dc10_ok = hw.has_value() && voltage_in_range(hw->dc10_v, 0.95, 1.10);
+    // N4 R1.4 documents DC18 as a 1.7-1.9 V rail, but the official
+    // HWSTATUSA ASCII example itself reports 0.908 V. Until verified on
+    // hardware, keep this check permissive and expose the raw voltage.
+    const bool dc18_ok = hw.has_value() && std::isfinite(hw->dc18_v) && hw->dc18_v > 0.0;
+    const bool voltages_ok = dc09_ok && dc10_ok && dc18_ok;
+    const bool clock_ok = hw.has_value() && hw->clock_flag == 1;
+    const bool pll_ok = hw.has_value() && hw->pll_lock != 0;
+    const bool hardware_ok = hw.has_value() && voltages_ok && clock_ok && pll_ok;
+
+    s.values.push_back(kv("status_enabled", enable_hw_status_ ? "True" : "False"));
+    s.values.push_back(kv("hwstatus_available", hw.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("last_hwstatus_age_s", std::isfinite(hw_age) ? to_string_or_nan(hw_age) : "inf"));
+    s.values.push_back(kv("hardware_ok", hardware_ok ? "True" : "False"));
+    s.values.push_back(kv("antenna_status", describe_antenna_status(agc)));
+
+    if (hw.has_value())
+    {
+      s.values.push_back(kv("dc09_v", to_string_or_nan(hw->dc09_v)));
+      s.values.push_back(kv("dc10_v", to_string_or_nan(hw->dc10_v)));
+      s.values.push_back(kv("dc18_v", to_string_or_nan(hw->dc18_v)));
+      s.values.push_back(kv("clock_drift_mps", to_string_or_nan(hw->clock_drift_mps)));
+      s.values.push_back(kv("hw_flags", to_hex_byte(hw->hw_flag)));
+      s.values.push_back(kv("hw_flags_detail", describe_hw_flag_bits(hw->hw_flag)));
+      s.values.push_back(kv("clock_status", describe_clock_status(hw->clock_flag, hw->hw_flag)));
+      s.values.push_back(kv("pll_status", describe_pll_status(hw->pll_lock)));
+      s.values.push_back(kv("pll_lock_mask", to_hex_word(static_cast<uint32_t>(hw->pll_lock))));
+    }
+    else
+    {
+      s.values.push_back(kv("hw_flags", "n/a"));
+      s.values.push_back(kv("clock_status", "n/a"));
+      s.values.push_back(kv("pll_status", "n/a"));
+    }
+
+    if (!enable_hw_status_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "hardware diagnostics disabled";
+    }
+    else if (!hw.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "HWSTATUSA stale or missing";
+    }
+    else if (!voltages_ok)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "supply rail out of range";
+    }
+    else if (!clock_ok)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "clock drift invalid";
+    }
+    else if (!pll_ok)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "PLL lock missing";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "hardware healthy";
+    }
+    return s;
+  }
+
+  diagnostic_msgs::msg::DiagnosticStatus gps_jamming_status() const
+  {
+    diagnostic_msgs::msg::DiagnosticStatus s;
+    s.name = "GPS: jamming";
+    s.hardware_id = "unicore_um982";
+
+    const auto jam = active_jam_status();
+    const auto freq_jam = active_freq_jam_status();
+    const double jam_age = latest_jam_status_.has_value()
+                               ? age_seconds(latest_jam_status_->received_at)
+                               : std::numeric_limits<double>::infinity();
+    const double freq_age = latest_freq_jam_status_.has_value()
+                                ? age_seconds(latest_freq_jam_status_->received_at)
+                                : std::numeric_limits<double>::infinity();
+
+    int strongest_flag = jam.has_value() ? jam->cw_flag : -1;
+    int strongest_ratio = jam.has_value() ? jam->cw_ratio : -1;
+    std::vector<std::string> jammed_frequencies;
+    static const std::array<std::string, 3> kJamBands = {"L1", "L2", "L5"};
+    if (freq_jam.has_value())
+    {
+      for (std::size_t i = 0; i < kJamBands.size(); ++i)
+      {
+        strongest_flag = std::max(strongest_flag, freq_jam->cw_flag[i]);
+        strongest_ratio = std::max(strongest_ratio, freq_jam->cw_ratio[i]);
+        if (freq_jam->cw_flag[i] > 0)
+        {
+          jammed_frequencies.push_back(kJamBands[i]);
+        }
+      }
+    }
+    const bool jamming_detected = strongest_flag > 0;
+    const std::string jammed_frequency_text =
+        freq_jam.has_value() ? (jammed_frequencies.empty() ? "none" : join_strings(jammed_frequencies))
+                             : "n/a";
+
+    s.values.push_back(kv("status_enabled", enable_jamming_status_ ? "True" : "False"));
+    s.values.push_back(kv("jamstatus_available", jam.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("freqjamstatus_available", freq_jam.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("last_jamstatus_age_s", std::isfinite(jam_age) ? to_string_or_nan(jam_age) : "inf"));
+    s.values.push_back(kv("last_freqjamstatus_age_s",
+                          std::isfinite(freq_age) ? to_string_or_nan(freq_age) : "inf"));
+    s.values.push_back(kv("jamming_detected", jamming_detected ? "True" : "False"));
+    s.values.push_back(kv("jam_level", describe_jam_flag(strongest_flag)));
+    s.values.push_back(kv("jam_ratio_max", strongest_ratio >= 0 ? std::to_string(strongest_ratio) : "n/a"));
+    s.values.push_back(kv("jammed_frequencies", jammed_frequency_text));
+
+    if (jam.has_value())
+    {
+      s.values.push_back(kv("global_position_type", jam->position_type));
+      s.values.push_back(kv("global_cw_ratio", std::to_string(jam->cw_ratio)));
+      s.values.push_back(kv("global_cw_flag", describe_jam_flag(jam->cw_flag)));
+    }
+
+    if (freq_jam.has_value())
+    {
+      s.values.push_back(kv("jam_l1_ratio", std::to_string(freq_jam->cw_ratio[0])));
+      s.values.push_back(kv("jam_l1_flag", describe_jam_flag(freq_jam->cw_flag[0])));
+      s.values.push_back(kv("jam_l2_ratio", std::to_string(freq_jam->cw_ratio[1])));
+      s.values.push_back(kv("jam_l2_flag", describe_jam_flag(freq_jam->cw_flag[1])));
+      s.values.push_back(kv("jam_l5_ratio", std::to_string(freq_jam->cw_ratio[2])));
+      s.values.push_back(kv("jam_l5_flag", describe_jam_flag(freq_jam->cw_flag[2])));
+    }
+
+    if (!enable_jamming_status_)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "jamming diagnostics disabled";
+    }
+    else if (!jam.has_value() && !freq_jam.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "JAMSTATUSA/FREQJAMSTATUSA stale or missing";
+    }
+    else if (strongest_flag >= 2)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      s.message = "strong jamming detected";
+    }
+    else if (strongest_flag == 1)
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = "jamming detected";
+    }
+    else
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "no jamming detected";
+    }
+    return s;
+  }
+
   diagnostic_msgs::msg::DiagnosticStatus gps_parser_status()
   {
     diagnostic_msgs::msg::DiagnosticStatus s;
@@ -1252,6 +1712,18 @@ private:
       array.status.push_back(gps_rtk_status());
     }
     array.status.push_back(gps_ntrip_status());
+    if (enable_rf_status_)
+    {
+      array.status.push_back(gps_rf_status());
+    }
+    if (enable_hw_status_)
+    {
+      array.status.push_back(gps_hardware_status());
+    }
+    if (enable_jamming_status_)
+    {
+      array.status.push_back(gps_jamming_status());
+    }
     array.status.push_back(gps_parser_status());
     diagnostics_pub_->publish(array);
   }
@@ -1305,10 +1777,14 @@ private:
   double rtcm_timeout_sec_{5.0};
   double max_diff_age_sec_{5.0};
   double satellite_diag_timeout_sec_{5.0};
+  double rf_diag_timeout_sec_{5.0};
   bool enable_rtk_status_{true};
   bool enable_rtcm_status_{true};
   bool enable_satellite_status_{true};
   bool enable_satsinfo_{true};
+  bool enable_rf_status_{true};
+  bool enable_hw_status_{true};
+  bool enable_jamming_status_{true};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -1329,6 +1805,10 @@ private:
   std::optional<TimedData<RtcmStatusData>> latest_rtcm_status_;
   std::optional<TimedData<BestSatData>> latest_bestsat_;
   std::optional<TimedData<SatsInfoData>> latest_satsinfo_;
+  std::optional<TimedData<AgcData>> latest_agc_;
+  std::optional<TimedData<HwStatusData>> latest_hw_status_;
+  std::optional<TimedData<JamStatusData>> latest_jam_status_;
+  std::optional<TimedData<FreqJamStatusData>> latest_freq_jam_status_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
 

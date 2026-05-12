@@ -115,6 +115,41 @@ constexpr std::size_t kSatsinfoaFrequencyFlagIndex = 14;
 constexpr std::size_t kSatsinfoaFirstSatelliteIndex = 15;
 constexpr std::size_t kSatsinfoaBaseSatelliteFieldCount = 7;
 constexpr std::size_t kSatsinfoaExtraFrequencyFieldCount = 4;
+
+// AGCA layout per Table 7-130 in N4 R1.4:
+//   #AGCA,<ascii_header>;ant1_l1,ant1_l2,ant1_l5,res,res,ant2_l1,ant2_l2,ant2_l5,...
+constexpr std::size_t kAgcaAnt1L1Index = 9;
+constexpr std::size_t kAgcaAnt1L2Index = 10;
+constexpr std::size_t kAgcaAnt1L5Index = 11;
+constexpr std::size_t kAgcaAnt2L1Index = 14;
+constexpr std::size_t kAgcaAnt2L2Index = 15;
+constexpr std::size_t kAgcaAnt2L5Index = 16;
+
+// HWSTATUSA layout per Table 7-128 in N4 R1.4:
+//   #HWSTATUSA,<ascii_header>;reserved,dc09,dc10,dc18,clockflag,clockdrift,...
+constexpr std::size_t kHwstatusaDc09Index = 10;
+constexpr std::size_t kHwstatusaDc10Index = 11;
+constexpr std::size_t kHwstatusaDc18Index = 12;
+constexpr std::size_t kHwstatusaClockFlagIndex = 13;
+constexpr std::size_t kHwstatusaClockDriftIndex = 14;
+constexpr std::size_t kHwstatusaHwFlagIndex = 16;
+constexpr std::size_t kHwstatusaPllLockIndex = 18;
+
+// JAMSTATUSA layout per Table 7-124 in N4 R1.4:
+//   #JAMSTATUSA,<ascii_header>;pos_type,cw_ratio,cw_flag,...
+constexpr std::size_t kJamstatusaPositionTypeIndex = 9;
+constexpr std::size_t kJamstatusaCwRatioIndex = 10;
+constexpr std::size_t kJamstatusaCwFlagIndex = 11;
+
+// FREQJAMSTATUSA layout per Table 7-125 in N4 R1.4:
+//   #FREQJAMSTATUSA,<ascii_header>;pos_type,l1_ratio,l1_flag,l2_ratio,l2_flag,l5_ratio,l5_flag,...
+constexpr std::size_t kFreqjamstatusaPositionTypeIndex = 9;
+constexpr std::size_t kFreqjamstatusaL1RatioIndex = 10;
+constexpr std::size_t kFreqjamstatusaL1FlagIndex = 11;
+constexpr std::size_t kFreqjamstatusaL2RatioIndex = 12;
+constexpr std::size_t kFreqjamstatusaL2FlagIndex = 13;
+constexpr std::size_t kFreqjamstatusaL5RatioIndex = 14;
+constexpr std::size_t kFreqjamstatusaL5FlagIndex = 15;
 // N4 R1.4 PVTSLNA layout:
 //   #PVTSLNA,<ascii_header>;bestpos_type,bestpos_hgt,bestpos_lat,...
 //
@@ -395,6 +430,30 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
     if (fields.front() == "SATSINFOA")
     {
       auto parsed = parse_satsinfoa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "AGCA")
+    {
+      auto parsed = parse_agca(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "HWSTATUSA")
+    {
+      auto parsed = parse_hwstatusa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "JAMSTATUSA")
+    {
+      auto parsed = parse_jamstatusa(fields);
+      parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
+      return parsed;
+    }
+    if (fields.front() == "FREQJAMSTATUSA")
+    {
+      auto parsed = parse_freqjamstatusa(fields);
       parsed.has_value() ? ++counters_.parsed_sentences : ++counters_.parse_errors;
       return parsed;
     }
@@ -1137,6 +1196,122 @@ std::optional<ParsedSentence> Um982Parser::parse_satsinfoa(
     sentence.satsinfo->entries.push_back(entry);
   }
 
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_agca(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kAgcaAnt2L5Index)
+  {
+    return std::nullopt;
+  }
+
+  AgcData agc;
+  if (!parse_int(field_after_semicolon(fields[kAgcaAnt1L1Index]), agc.antenna1[0]) ||
+      !parse_int(fields[kAgcaAnt1L2Index], agc.antenna1[1]) ||
+      !parse_int(fields[kAgcaAnt1L5Index], agc.antenna1[2]) ||
+      !parse_int(fields[kAgcaAnt2L1Index], agc.antenna2[0]) ||
+      !parse_int(fields[kAgcaAnt2L2Index], agc.antenna2[1]) ||
+      !parse_int(fields[kAgcaAnt2L5Index], agc.antenna2[2]))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "AGCA";
+  sentence.agc = agc;
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_hwstatusa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kHwstatusaPllLockIndex)
+  {
+    return std::nullopt;
+  }
+
+  double dc09 = 0.0;
+  double dc10 = 0.0;
+  double dc18 = 0.0;
+  int clock_flag = -1;
+  double clock_drift = 0.0;
+  uint32_t hw_flag = 0U;
+  uint32_t pll_lock = 0U;
+  if (!parse_double(fields[kHwstatusaDc09Index], dc09) ||
+      !parse_double(fields[kHwstatusaDc10Index], dc10) ||
+      !parse_double(fields[kHwstatusaDc18Index], dc18) ||
+      !parse_int(fields[kHwstatusaClockFlagIndex], clock_flag) ||
+      !parse_double(fields[kHwstatusaClockDriftIndex], clock_drift) ||
+      !parse_uint32(fields[kHwstatusaHwFlagIndex], 16, hw_flag) ||
+      !parse_uint32(fields[kHwstatusaPllLockIndex], 16, pll_lock))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "HWSTATUSA";
+  sentence.hw_status = HwStatusData{};
+  sentence.hw_status->dc09_v = dc09;
+  sentence.hw_status->dc10_v = dc10;
+  sentence.hw_status->dc18_v = dc18;
+  sentence.hw_status->clock_flag = clock_flag;
+  sentence.hw_status->clock_drift_mps = clock_drift;
+  sentence.hw_status->hw_flag = static_cast<int>(hw_flag);
+  sentence.hw_status->pll_lock = static_cast<int>(pll_lock);
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_jamstatusa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kJamstatusaCwFlagIndex)
+  {
+    return std::nullopt;
+  }
+
+  int cw_ratio = -1;
+  int cw_flag = -1;
+  if (!parse_int(fields[kJamstatusaCwRatioIndex], cw_ratio) ||
+      !parse_int(fields[kJamstatusaCwFlagIndex], cw_flag))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "JAMSTATUSA";
+  sentence.jam_status = JamStatusData{};
+  sentence.jam_status->position_type =
+      std::string(field_after_semicolon(fields[kJamstatusaPositionTypeIndex]));
+  sentence.jam_status->cw_ratio = cw_ratio;
+  sentence.jam_status->cw_flag = cw_flag;
+  return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_freqjamstatusa(
+    const std::vector<std::string_view>& fields)
+{
+  if (fields.size() <= kFreqjamstatusaL5FlagIndex)
+  {
+    return std::nullopt;
+  }
+
+  FreqJamStatusData freq_jam;
+  freq_jam.position_type = std::string(field_after_semicolon(fields[kFreqjamstatusaPositionTypeIndex]));
+  if (!parse_int(fields[kFreqjamstatusaL1RatioIndex], freq_jam.cw_ratio[0]) ||
+      !parse_int(fields[kFreqjamstatusaL1FlagIndex], freq_jam.cw_flag[0]) ||
+      !parse_int(fields[kFreqjamstatusaL2RatioIndex], freq_jam.cw_ratio[1]) ||
+      !parse_int(fields[kFreqjamstatusaL2FlagIndex], freq_jam.cw_flag[1]) ||
+      !parse_int(fields[kFreqjamstatusaL5RatioIndex], freq_jam.cw_ratio[2]) ||
+      !parse_int(fields[kFreqjamstatusaL5FlagIndex], freq_jam.cw_flag[2]))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "FREQJAMSTATUSA";
+  sentence.freq_jam_status = freq_jam;
   return sentence;
 }
 

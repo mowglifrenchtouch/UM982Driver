@@ -158,6 +158,40 @@ struct SatsInfoData
   std::vector<SatsInfoEntry> entries;
 };
 
+struct AgcData
+{
+  // L1/L2/L5 AGC register values for the master antenna.
+  std::array<int, 3> antenna1{{-1, -1, -1}};
+  // L1/L2/L5 AGC register values for the slave antenna when present.
+  std::array<int, 3> antenna2{{-1, -1, -1}};
+};
+
+struct HwStatusData
+{
+  double dc09_v{-1.0};
+  double dc10_v{-1.0};
+  double dc18_v{-1.0};
+  int clock_flag{-1};
+  double clock_drift_mps{-1.0};
+  int hw_flag{-1};
+  int pll_lock{-1};
+};
+
+struct JamStatusData
+{
+  std::string position_type;
+  int cw_ratio{-1};
+  int cw_flag{-1};
+};
+
+struct FreqJamStatusData
+{
+  std::string position_type;
+  // L1/L2/L5 frequency-family jamming status from FREQJAMSTATUSA.
+  std::array<int, 3> cw_ratio{{-1, -1, -1}};
+  std::array<int, 3> cw_flag{{-1, -1, -1}};
+};
+
 struct GsvData
 {
   // Two-letter NMEA talker prefix carried verbatim from the GSV
@@ -186,6 +220,10 @@ struct ParsedSentence
   std::optional<RtcmStatusData> rtcm_status;
   std::optional<BestSatData> bestsat;
   std::optional<SatsInfoData> satsinfo;
+  std::optional<AgcData> agc;
+  std::optional<HwStatusData> hw_status;
+  std::optional<JamStatusData> jam_status;
+  std::optional<FreqJamStatusData> freq_jam_status;
   std::optional<GsvData> gsv;
 };
 
@@ -217,6 +255,11 @@ private:
   static std::optional<ParsedSentence> parse_rtcmstatusa(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_bestsata(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_satsinfoa(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_agca(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_hwstatusa(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_jamstatusa(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_freqjamstatusa(
+      const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_gsv(std::string_view talker,
                                                  const std::vector<std::string_view>& fields);
 

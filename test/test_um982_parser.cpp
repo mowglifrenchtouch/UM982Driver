@@ -388,6 +388,83 @@ TEST(Um982Parser, ParsesSatsinfoaWithZeroCn0)
   EXPECT_NEAR(parsed->satsinfo->entries[0].signals[0].cn0_db_hz, 0.0, 1e-9);
 }
 
+TEST(Um982Parser, ParsesAgcaRfLevels)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "AGCA,65,GPS,FINE,2190,375570000,0,0,18,37;44,46,63,-1,-1,41,1,0,-1,-1"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->agc.has_value());
+  EXPECT_EQ(parsed->sentence_type, "AGCA");
+  EXPECT_EQ(parsed->agc->antenna1[0], 44);
+  EXPECT_EQ(parsed->agc->antenna1[1], 46);
+  EXPECT_EQ(parsed->agc->antenna1[2], 63);
+  EXPECT_EQ(parsed->agc->antenna2[0], 41);
+  EXPECT_EQ(parsed->agc->antenna2[1], 1);
+  EXPECT_EQ(parsed->agc->antenna2[2], 0);
+}
+
+TEST(Um982Parser, ParsesHwstatusaHealth)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "HWSTATUSA,97,GPS,FINE,2221,111183000,0,0,18,15;66807,0.920,1.020,0.908,1,-0.693,0.0,0x00,0,0x0377,0,0"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->hw_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "HWSTATUSA");
+  EXPECT_NEAR(parsed->hw_status->dc09_v, 0.920, 1e-9);
+  EXPECT_NEAR(parsed->hw_status->dc10_v, 1.020, 1e-9);
+  EXPECT_NEAR(parsed->hw_status->dc18_v, 0.908, 1e-9);
+  EXPECT_EQ(parsed->hw_status->clock_flag, 1);
+  EXPECT_NEAR(parsed->hw_status->clock_drift_mps, -0.693, 1e-9);
+  EXPECT_EQ(parsed->hw_status->hw_flag, 0x00);
+  EXPECT_EQ(parsed->hw_status->pll_lock, 0x0377);
+}
+
+TEST(Um982Parser, ParsesHwstatusaWithNonZeroHwFlag)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "HWSTATUSA,97,GPS,FINE,2221,111183000,0,0,18,15;66807,0.930,1.010,1.800,1,0.125,0.0,0x91,0,0x0001,0,0"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->hw_status.has_value());
+  EXPECT_EQ(parsed->hw_status->hw_flag, 0x91);
+  EXPECT_EQ(parsed->hw_status->pll_lock, 0x0001);
+}
+
+TEST(Um982Parser, ParsesJamstatusaNoJamming)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "JAMSTATUSA,97,GPS,FINE,2190,365412000,0,0,18,14;SINGLE,0,0,0,0"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->jam_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "JAMSTATUSA");
+  EXPECT_EQ(parsed->jam_status->position_type, "SINGLE");
+  EXPECT_EQ(parsed->jam_status->cw_ratio, 0);
+  EXPECT_EQ(parsed->jam_status->cw_flag, 0);
+}
+
+TEST(Um982Parser, ParsesFreqjamstatusaDetectedJamming)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "FREQJAMSTATUSA,97,GPS,FINE,2164,559464000,0,0,18,8;SINGLE,255,2,0,0,0,0,0,0"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->freq_jam_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "FREQJAMSTATUSA");
+  EXPECT_EQ(parsed->freq_jam_status->position_type, "SINGLE");
+  EXPECT_EQ(parsed->freq_jam_status->cw_ratio[0], 255);
+  EXPECT_EQ(parsed->freq_jam_status->cw_flag[0], 2);
+  EXPECT_EQ(parsed->freq_jam_status->cw_ratio[1], 0);
+  EXPECT_EQ(parsed->freq_jam_status->cw_flag[2], 0);
+}
+
 TEST(Um982Parser, RejectsBadChecksum)
 {
   Um982Parser parser;
