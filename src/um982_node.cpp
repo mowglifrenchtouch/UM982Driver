@@ -340,6 +340,15 @@ std::string mean_cn0_or_na(const Cn0Accumulator& acc)
   return to_string_or_nan(acc.sum_db_hz / static_cast<double>(acc.sample_count));
 }
 
+std::optional<double> mean_cn0_value(const Cn0Accumulator& acc)
+{
+  if (acc.sample_count == 0U)
+  {
+    return std::nullopt;
+  }
+  return acc.sum_db_hz / static_cast<double>(acc.sample_count);
+}
+
 std::string max_cn0_or_na(const Cn0Accumulator& acc)
 {
   if (acc.sample_count == 0U)
@@ -531,6 +540,8 @@ public:
     use_binary_nav_ = declare_parameter<bool>("use_binary_nav", false);
     binary_compare_ascii_ = declare_parameter<bool>("binary_compare_ascii", true);
     binary_nav_timeout_sec_ = declare_parameter<double>("binary_nav_timeout_sec", 2.0);
+    use_binary_satellite_diag_ = declare_parameter<bool>("use_binary_satellite_diag", false);
+    use_binary_rtcm_diag_ = declare_parameter<bool>("use_binary_rtcm_diag", false);
     transport_.set_options(
         {enable_unicore_binary_, binary_parser_strict_crc_, binary_max_frame_size_});
 
@@ -557,7 +568,8 @@ public:
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
                 "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs "
-                "binary=%s strict_crc=%s binary_max_frame=%zu use_binary_nav=%s compare_ascii=%s "
+                "binary=%s strict_crc=%s binary_max_frame=%zu use_binary_nav=%s "
+                "use_binary_satellite_diag=%s use_binary_rtcm_diag=%s compare_ascii=%s "
                 "binary_nav_timeout=%.1fs",
                 port_.c_str(),
                 baudrate_,
@@ -571,6 +583,8 @@ public:
                 binary_parser_strict_crc_ ? "true" : "false",
                 binary_max_frame_size_,
                 use_binary_nav_ ? "true" : "false",
+                use_binary_satellite_diag_ ? "true" : "false",
+                use_binary_rtcm_diag_ ? "true" : "false",
                 binary_compare_ascii_ ? "true" : "false",
                 binary_nav_timeout_sec_);
   }
@@ -833,6 +847,29 @@ private:
     {
       latest_binary_bestnav_ = TimedData<BestNavData>{*parsed->bestnav, received_at};
     }
+
+    if (parsed->rtcm_status.has_value())
+    {
+      latest_binary_rtcm_status_ = TimedData<RtcmStatusData>{*parsed->rtcm_status, received_at};
+      if (parsed->rtcm_status->message_id >= 0)
+      {
+        recent_binary_rtcm_message_ids_.push_back(parsed->rtcm_status->message_id);
+        if (recent_binary_rtcm_message_ids_.size() > 8U)
+        {
+          recent_binary_rtcm_message_ids_.pop_front();
+        }
+      }
+    }
+
+    if (parsed->bestsat.has_value())
+    {
+      latest_binary_bestsat_ = TimedData<BestSatData>{*parsed->bestsat, received_at};
+    }
+
+    if (parsed->satsinfo.has_value())
+    {
+      latest_binary_satsinfo_ = TimedData<SatsInfoData>{*parsed->satsinfo, received_at};
+    }
   }
 
   bool is_fresh(const SteadyTime& stamp) const
@@ -893,7 +930,7 @@ private:
     return std::nullopt;
   }
 
-  std::optional<RtcmStatusData> active_rtcm_status() const
+  std::optional<RtcmStatusData> active_ascii_rtcm_status() const
   {
     if (latest_rtcm_status_.has_value() &&
         is_fresh(latest_rtcm_status_->received_at, rtcm_timeout_sec_))
@@ -903,7 +940,29 @@ private:
     return std::nullopt;
   }
 
-  std::optional<BestSatData> active_bestsat() const
+  std::optional<RtcmStatusData> active_binary_rtcm_status() const
+  {
+    if (latest_binary_rtcm_status_.has_value() &&
+        is_fresh(latest_binary_rtcm_status_->received_at, rtcm_timeout_sec_))
+    {
+      return latest_binary_rtcm_status_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RtcmStatusData> active_rtcm_status() const
+  {
+    if (use_binary_rtcm_diag_)
+    {
+      if (const auto binary = active_binary_rtcm_status(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_rtcm_status();
+  }
+
+  std::optional<BestSatData> active_ascii_bestsat() const
   {
     if (latest_bestsat_.has_value() &&
         is_fresh(latest_bestsat_->received_at, satellite_diag_timeout_sec_))
@@ -913,7 +972,29 @@ private:
     return std::nullopt;
   }
 
-  std::optional<SatsInfoData> active_satsinfo() const
+  std::optional<BestSatData> active_binary_bestsat() const
+  {
+    if (latest_binary_bestsat_.has_value() &&
+        is_fresh(latest_binary_bestsat_->received_at, satellite_diag_timeout_sec_))
+    {
+      return latest_binary_bestsat_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<BestSatData> active_bestsat() const
+  {
+    if (use_binary_satellite_diag_)
+    {
+      if (const auto binary = active_binary_bestsat(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_bestsat();
+  }
+
+  std::optional<SatsInfoData> active_ascii_satsinfo() const
   {
     if (latest_satsinfo_.has_value() &&
         is_fresh(latest_satsinfo_->received_at, satellite_diag_timeout_sec_))
@@ -921,6 +1002,28 @@ private:
       return latest_satsinfo_->data;
     }
     return std::nullopt;
+  }
+
+  std::optional<SatsInfoData> active_binary_satsinfo() const
+  {
+    if (latest_binary_satsinfo_.has_value() &&
+        is_fresh(latest_binary_satsinfo_->received_at, satellite_diag_timeout_sec_))
+    {
+      return latest_binary_satsinfo_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<SatsInfoData> active_satsinfo() const
+  {
+    if (use_binary_satellite_diag_)
+    {
+      if (const auto binary = active_binary_satsinfo(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_satsinfo();
   }
 
   std::optional<AgcData> active_agc() const
@@ -1333,14 +1436,26 @@ private:
     }
 
     const auto bestnav = active_bestnav();
+    const auto ascii_bestnav = active_ascii_bestnav();
+    const auto binary_bestnav = active_binary_bestnav();
     const auto bestsat = active_bestsat();
+    const auto ascii_bestsat = active_ascii_bestsat();
+    const auto binary_bestsat = active_binary_bestsat();
     const auto satsinfo = active_satsinfo();
-    const double bestsat_age = latest_bestsat_.has_value()
-                                   ? age_seconds(latest_bestsat_->received_at)
-                                   : std::numeric_limits<double>::infinity();
-    const double satsinfo_age = latest_satsinfo_.has_value()
-                                    ? age_seconds(latest_satsinfo_->received_at)
-                                    : std::numeric_limits<double>::infinity();
+    const auto ascii_satsinfo = active_ascii_satsinfo();
+    const auto binary_satsinfo = active_binary_satsinfo();
+    const auto timed_age_or_inf = [this](const auto& timed) {
+      return timed.has_value() ? age_seconds(timed->received_at)
+                               : std::numeric_limits<double>::infinity();
+    };
+    const double bestsat_age = use_binary_satellite_diag_ ? timed_age_or_inf(latest_binary_bestsat_)
+                                                          : timed_age_or_inf(latest_bestsat_);
+    const double satsinfo_age = use_binary_satellite_diag_ ? timed_age_or_inf(latest_binary_satsinfo_)
+                                                           : timed_age_or_inf(latest_satsinfo_);
+    const double binary_satellite_age =
+        std::min(timed_age_or_inf(latest_binary_bestsat_), timed_age_or_inf(latest_binary_satsinfo_));
+    const char* bestsat_label = use_binary_satellite_diag_ ? "BESTSATB" : "BESTSATA";
+    const char* satsinfo_label = use_binary_satellite_diag_ ? "SATSINFOB" : "SATSINFOA";
 
     static const std::array<std::string, 5> kPrimaryConstellations = {
         "GPS", "GLO", "GAL", "BDS", "QZSS"};
@@ -1417,6 +1532,55 @@ private:
     }
 
     const int tracked = bestnav.has_value() ? bestnav->satellites_tracked : visible_total;
+
+    auto cn0_accumulator_from_satsinfo = [](const std::optional<SatsInfoData>& data) {
+      Cn0Accumulator acc;
+      if (!data.has_value())
+      {
+        return acc;
+      }
+      for (const auto& entry : data->entries)
+      {
+        for (const auto& signal : entry.signals)
+        {
+          add_cn0_sample(acc, signal.cn0_db_hz);
+        }
+      }
+      return acc;
+    };
+
+    auto visible_total_from_satsinfo =
+        [](const std::optional<SatsInfoData>& data) -> std::optional<int> {
+      if (!data.has_value())
+      {
+        return std::nullopt;
+      }
+      return static_cast<int>(data->entries.size());
+    };
+
+    auto used_total_from_bestsat =
+        [](const std::optional<BestSatData>& data) -> std::optional<int> {
+      if (!data.has_value())
+      {
+        return std::nullopt;
+      }
+      return static_cast<int>(data->entries.size());
+    };
+
+    const int ascii_visible_total =
+        visible_total_from_satsinfo(ascii_satsinfo).value_or(total);
+    const int ascii_used_total = used_total_from_bestsat(ascii_bestsat)
+                                     .value_or(ascii_bestnav.has_value() ? ascii_bestnav->satellites_used
+                                                                         : total);
+    const std::optional<int> binary_visible_total = visible_total_from_satsinfo(binary_satsinfo);
+    std::optional<int> binary_used_total = used_total_from_bestsat(binary_bestsat);
+    if (!binary_used_total.has_value() && binary_bestnav.has_value())
+    {
+      binary_used_total = binary_bestnav->satellites_used;
+    }
+    const auto ascii_cn0_mean = mean_cn0_value(cn0_accumulator_from_satsinfo(ascii_satsinfo));
+    const auto binary_cn0_mean = mean_cn0_value(cn0_accumulator_from_satsinfo(binary_satsinfo));
+
     s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
                                            diagnostic_feed_state(true, satsinfo.has_value() || !enable_satsinfo_))));
     s.values.push_back(kv("satellite_status_enabled", enable_satellite_status_ ? "True" : "False"));
@@ -1424,16 +1588,50 @@ private:
     s.values.push_back(kv("bestsat_available", bestsat.has_value() ? "True" : "False"));
     s.values.push_back(kv("satsinfo_available", satsinfo.has_value() ? "True" : "False"));
     s.values.push_back(
+        kv("use_binary_satellite_diag", use_binary_satellite_diag_ ? "True" : "False"));
+    s.values.push_back(kv("binary_bestsat_available", binary_bestsat.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_satsinfo_available", binary_satsinfo.has_value() ? "True" : "False"));
+    s.values.push_back(
         kv("last_bestsat_age_s", std::isfinite(bestsat_age) ? to_string_or_nan(bestsat_age) : "inf"));
     s.values.push_back(kv("last_satsinfo_age_s",
                           std::isfinite(satsinfo_age) ? to_string_or_nan(satsinfo_age) : "inf"));
+    s.values.push_back(
+        kv("binary_satellite_age_s",
+           std::isfinite(binary_satellite_age) ? to_string_or_nan(binary_satellite_age) : "inf"));
     s.values.push_back(kv("visible", std::to_string(visible_total)));
     s.values.push_back(kv("tracked", std::to_string(tracked)));
     s.values.push_back(kv("used", std::to_string(used_total)));
+    s.values.push_back(kv("binary_visible_satellites",
+                          binary_visible_total.has_value()
+                              ? std::to_string(*binary_visible_total)
+                              : "n/a"));
+    s.values.push_back(kv("binary_used_satellites",
+                          binary_used_total.has_value()
+                              ? std::to_string(*binary_used_total)
+                              : "n/a"));
     s.values.push_back(kv("constellations_used",
                           constellation_summary.empty() ? "n/a" : constellation_summary));
     s.values.push_back(kv("cn0_mean_db_hz", mean_cn0_or_na(cn0_all)));
     s.values.push_back(kv("cn0_max_db_hz", max_cn0_or_na(cn0_all)));
+    s.values.push_back(kv("binary_cn0_mean_db_hz",
+                          binary_cn0_mean.has_value() ? to_string_or_nan(*binary_cn0_mean) : "n/a"));
+
+    if (binary_compare_ascii_)
+    {
+      s.values.push_back(kv("binary_ascii_visible_satellites_delta",
+                            binary_visible_total.has_value()
+                                ? std::to_string(*binary_visible_total - ascii_visible_total)
+                                : "n/a"));
+      s.values.push_back(kv("binary_ascii_used_satellites_delta",
+                            binary_used_total.has_value()
+                                ? std::to_string(*binary_used_total - ascii_used_total)
+                                : "n/a"));
+      s.values.push_back(kv("binary_ascii_cn0_mean_delta_db_hz",
+                            (binary_cn0_mean.has_value() && ascii_cn0_mean.has_value())
+                                ? to_string_or_nan(*binary_cn0_mean - *ascii_cn0_mean)
+                                : "n/a"));
+    }
 
     for (const auto& name : kPrimaryConstellations)
     {
@@ -1464,22 +1662,32 @@ private:
     else if (enable_satsinfo_ && !satsinfo.has_value() && gsv_counts_.empty())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      s.message = "SATSINFOA missing and no GSV fallback";
+      s.message = std::string(satsinfo_label) + " missing and no GSV fallback";
+    }
+    else if (use_binary_satellite_diag_ && enable_satsinfo_ && !binary_satsinfo.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = std::string(satsinfo_label) + " stale or missing";
     }
     else if (enable_satsinfo_ && !satsinfo.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "SATSINFOA stale or missing";
+      s.message = std::string(satsinfo_label) + " stale or missing";
     }
     else if (visible_total == 0)
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
       s.message = "no visible satellites";
     }
+    else if (use_binary_satellite_diag_ && !binary_bestsat.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = std::string(bestsat_label) + " stale or missing";
+    }
     else if (!bestsat.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "BESTSATA stale or missing";
+      s.message = std::string(bestsat_label) + " stale or missing";
     }
     else if (bestsat.has_value() && used_total == 0)
     {
@@ -1675,10 +1883,19 @@ private:
         rtcm_history_.empty()
             ? std::numeric_limits<double>::infinity()
             : std::chrono::duration<double>(now_t - rtcm_history_.back()).count();
+    const auto ascii_rtcm_status = active_ascii_rtcm_status();
+    const auto binary_rtcm_status = active_binary_rtcm_status();
     const auto rtcm_status = active_rtcm_status();
-    const double receiver_age = last_rtcmstatus_time_.has_value()
-                                    ? age_seconds(*last_rtcmstatus_time_)
-                                    : std::numeric_limits<double>::infinity();
+    const double ascii_receiver_age = last_rtcmstatus_time_.has_value()
+                                          ? age_seconds(*last_rtcmstatus_time_)
+                                          : std::numeric_limits<double>::infinity();
+    const double binary_receiver_age = latest_binary_rtcm_status_.has_value()
+                                           ? age_seconds(latest_binary_rtcm_status_->received_at)
+                                           : std::numeric_limits<double>::infinity();
+    const double receiver_age =
+        use_binary_rtcm_diag_ && binary_rtcm_status.has_value() ? binary_receiver_age
+                                                                : ascii_receiver_age;
+    const char* rtcmstatus_label = use_binary_rtcm_diag_ ? "RTCMSTATUSB" : "RTCMSTATUSA";
 
     s.values.push_back(kv("msgs_per_sec", to_string_or_nan(rate)));
     s.values.push_back(
@@ -1690,13 +1907,21 @@ private:
     s.values.push_back(kv("rtcm_messages_total", std::to_string(rtcm_message_count_)));
     s.values.push_back(kv("rtcm_bytes_total", std::to_string(rtcm_byte_count_)));
     s.values.push_back(kv("rtcm_status_enabled", enable_rtcm_status_ ? "True" : "False"));
+    s.values.push_back(kv("use_binary_rtcm_diag", use_binary_rtcm_diag_ ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_rtcmstatus_available", binary_rtcm_status.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_rtcm_age_s",
+           std::isfinite(binary_receiver_age) ? to_string_or_nan(binary_receiver_age) : "inf"));
 
     std::string recent_types = "n/a";
-    if (!recent_rtcm_message_ids_.empty())
+    const auto& recent_message_ids =
+        use_binary_rtcm_diag_ ? recent_binary_rtcm_message_ids_ : recent_rtcm_message_ids_;
+    if (!recent_message_ids.empty())
     {
       std::vector<std::string> ids;
-      ids.reserve(recent_rtcm_message_ids_.size());
-      for (const int message_id : recent_rtcm_message_ids_)
+      ids.reserve(recent_message_ids.size());
+      for (const int message_id : recent_message_ids)
       {
         ids.emplace_back(std::to_string(message_id));
       }
@@ -1718,6 +1943,25 @@ private:
       s.values.push_back(kv("last_rtcm_l6", std::to_string(rtcm_status->observable_count[5])));
     }
 
+    if (binary_compare_ascii_)
+    {
+      const bool message_id_match = ascii_rtcm_status.has_value() && binary_rtcm_status.has_value() &&
+                                    ascii_rtcm_status->message_id == binary_rtcm_status->message_id;
+      s.values.push_back(
+          kv("binary_ascii_rtcm_msg_id_match", message_id_match ? "True" : "False"));
+      s.values.push_back(
+          kv("binary_ascii_rtcm_counter_delta",
+             message_id_match ? std::to_string(binary_rtcm_status->message_count -
+                                               ascii_rtcm_status->message_count)
+                              : "n/a"));
+      s.values.push_back(
+          kv("binary_ascii_rtcm_satellite_delta",
+             (ascii_rtcm_status.has_value() && binary_rtcm_status.has_value())
+                 ? std::to_string(binary_rtcm_status->satellite_count -
+                                  ascii_rtcm_status->satellite_count)
+                 : "n/a"));
+    }
+
     if (rtcm_history_.empty())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
@@ -1728,15 +1972,20 @@ private:
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       s.message = "RTCM injection stale";
     }
+    else if (enable_rtcm_status_ && use_binary_rtcm_diag_ && !binary_rtcm_status.has_value())
+    {
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      s.message = std::string("waiting for ") + rtcmstatus_label;
+    }
     else if (enable_rtcm_status_ && !rtcm_status.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "waiting for RTCMSTATUSA";
+      s.message = std::string("waiting for ") + rtcmstatus_label;
     }
     else if (enable_rtcm_status_ && receiver_age > rtcm_timeout_sec_)
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "RTCMSTATUSA stale";
+      s.message = std::string(rtcmstatus_label) + " stale";
     }
     else
     {
@@ -2167,6 +2416,8 @@ private:
   bool use_binary_nav_{false};
   bool binary_compare_ascii_{true};
   double binary_nav_timeout_sec_{2.0};
+  bool use_binary_satellite_diag_{false};
+  bool use_binary_rtcm_diag_{false};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -2197,6 +2448,9 @@ private:
   std::optional<TimedData<HeadingData>> latest_binary_heading_;
   std::optional<TimedData<VelocityData>> latest_binary_velocity_;
   std::optional<TimedData<BestNavData>> latest_binary_bestnav_;
+  std::optional<TimedData<RtcmStatusData>> latest_binary_rtcm_status_;
+  std::optional<TimedData<BestSatData>> latest_binary_bestsat_;
+  std::optional<TimedData<SatsInfoData>> latest_binary_satsinfo_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
   std::optional<SteadyTime> last_binary_frame_time_;
@@ -2211,6 +2465,7 @@ private:
   // chatty caster can't unbounded-grow the deque.
   std::deque<std::chrono::steady_clock::time_point> rtcm_history_;
   std::deque<int> recent_rtcm_message_ids_;
+  std::deque<int> recent_binary_rtcm_message_ids_;
   ParserCounters parser_counters_snapshot_{};
   UnicoreBinaryTransportCounters binary_counters_snapshot_{};
   std::size_t binary_unknown_frames_snapshot_{0U};

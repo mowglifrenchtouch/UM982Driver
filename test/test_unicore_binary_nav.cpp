@@ -69,6 +69,12 @@ void append_le8(std::vector<uint8_t>& out, uint8_t value)
   out.push_back(value);
 }
 
+void append_le16(std::vector<uint8_t>& out, uint16_t value)
+{
+  out.push_back(static_cast<uint8_t>(value & 0xFFU));
+  out.push_back(static_cast<uint8_t>((value >> 8U) & 0xFFU));
+}
+
 void append_le32(std::vector<uint8_t>& out, uint32_t value)
 {
   out.push_back(static_cast<uint8_t>(value & 0xFFU));
@@ -238,6 +244,126 @@ std::vector<uint8_t> make_pvtslnb_payload()
   return payload;
 }
 
+std::vector<uint8_t> make_bestsatb_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, 4U);
+
+  append_le32(payload, 0U);           // GPS
+  append_le32(payload, 19U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x03U);        // L1 + L2
+
+  append_le32(payload, 1U);           // GLONASS
+  append_le32(payload, (9U << 16U) | 57U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x03U);        // L1 + L2
+
+  append_le32(payload, 5U);           // GALILEO
+  append_le32(payload, 12U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x17U);        // E1 + E5 + common-view bit
+
+  append_le32(payload, 6U);           // BEIDOU
+  append_le32(payload, 27U);
+  append_le32(payload, 0U);
+  append_le32(payload, 0x05U);        // B1 + B3
+
+  return payload;
+}
+
+std::vector<uint8_t> make_satsinfob_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le8(payload, 4U);            // satellite count
+  append_le8(payload, 2U);            // version
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0x07U);         // L1/L2/L5 families present
+
+  append_le8(payload, 19U);
+  append_le16(payload, 123U);
+  append_le8(payload, 45U);
+  append_le8(payload, 0U);
+  append_le8(payload, 44U);
+  append_le8(payload, 0U);
+  append_le8(payload, 2U);
+  append_le8(payload, 0U);
+  append_le8(payload, 41U);
+  append_le8(payload, 17U);
+  append_le8(payload, 2U);
+
+  append_le8(payload, 57U);
+  append_le16(payload, 210U);
+  append_le8(payload, 33U);
+  append_le8(payload, 1U);
+  append_le8(payload, 39U);
+  append_le8(payload, 5U);
+  append_le8(payload, 1U);
+
+  append_le8(payload, 12U);
+  append_le16(payload, 300U);
+  append_le8(payload, 56U);
+  append_le8(payload, 3U);
+  append_le8(payload, 46U);
+  append_le8(payload, 1U);
+  append_le8(payload, 2U);
+  append_le8(payload, 3U);
+  append_le8(payload, 40U);
+  append_le8(payload, 17U);
+  append_le8(payload, 2U);
+
+  append_le8(payload, 27U);
+  append_le16(payload, 150U);
+  append_le8(payload, 28U);
+  append_le8(payload, 4U);
+  append_le8(payload, 42U);
+  append_le8(payload, 0U);
+  append_le8(payload, 3U);
+  append_le8(payload, 4U);
+  append_le8(payload, 38U);
+  append_le8(payload, 17U);
+  append_le8(payload, 3U);
+  append_le8(payload, 4U);
+  append_le8(payload, 36U);
+  append_le8(payload, 21U);
+  append_le8(payload, 3U);
+
+  return payload;
+}
+
+std::vector<uint8_t> make_rtcmstatusb_payload()
+{
+  std::vector<uint8_t> payload;
+  append_le32(payload, 1124U);
+  append_le32(payload, 21186U);
+  append_le32(payload, 42U);
+  append_le32(payload, 21U);
+  append_le8(payload, 0U);
+  append_le8(payload, 6U);
+  append_le8(payload, 11U);
+  append_le8(payload, 0U);
+  append_le8(payload, 0U);
+  append_le8(payload, 21U);
+  return payload;
+}
+
+double mean_cn0(const SatsInfoData& data)
+{
+  double sum = 0.0;
+  int count = 0;
+  for (const auto& entry : data.entries)
+  {
+    for (const auto& signal : entry.signals)
+    {
+      sum += signal.cn0_db_hz;
+      ++count;
+    }
+  }
+  return count > 0 ? (sum / static_cast<double>(count)) : 0.0;
+}
+
 }  // namespace
 
 TEST(UnicoreBinaryNavParser, ParsesBestnavbPayload)
@@ -302,6 +428,76 @@ TEST(UnicoreBinaryNavParser, ParsesPvtslnbPayload)
   EXPECT_NEAR(*parsed->heading->baseline_m, 1.5, 1e-4);
 }
 
+TEST(UnicoreBinaryNavParser, ParsesBestsatbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 1041U;
+  frame.payload = make_bestsatb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->bestsat.has_value());
+  ASSERT_EQ(parsed->bestsat->entries.size(), 4U);
+  EXPECT_EQ(parsed->sentence_type, "BESTSATB");
+  EXPECT_EQ(parsed->bestsat->entries[0].constellation, "GPS");
+  EXPECT_EQ(parsed->bestsat->entries[0].satellite_id, "19");
+  EXPECT_EQ(parsed->bestsat->entries[0].used_signal_bands.size(), 2U);
+  EXPECT_EQ(parsed->bestsat->entries[1].constellation, "GLO");
+  EXPECT_EQ(parsed->bestsat->entries[1].satellite_id, "57+9");
+  EXPECT_EQ(parsed->bestsat->entries[2].constellation, "GAL");
+  EXPECT_EQ(parsed->bestsat->entries[2].status, "GOOD");
+  EXPECT_EQ(parsed->bestsat->entries[3].constellation, "BDS");
+}
+
+TEST(UnicoreBinaryNavParser, ParsesSatsinfobPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 2124U;
+  frame.payload = make_satsinfob_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->satsinfo.has_value());
+  ASSERT_EQ(parsed->satsinfo->entries.size(), 4U);
+  EXPECT_EQ(parsed->sentence_type, "SATSINFOB");
+  EXPECT_EQ(parsed->satsinfo->version, 2);
+  EXPECT_EQ(parsed->satsinfo->frequency_flag, 0x07);
+  EXPECT_EQ(parsed->satsinfo->entries[0].constellation, "GPS");
+  EXPECT_EQ(parsed->satsinfo->entries[0].signals.size(), 2U);
+  EXPECT_EQ(parsed->satsinfo->entries[0].signals[1].band, "L2");
+  EXPECT_EQ(parsed->satsinfo->entries[1].constellation, "GLO");
+  EXPECT_EQ(parsed->satsinfo->entries[2].constellation, "GAL");
+  EXPECT_EQ(parsed->satsinfo->entries[2].signals[1].band, "E5");
+  EXPECT_EQ(parsed->satsinfo->entries[3].constellation, "BDS");
+  EXPECT_EQ(parsed->satsinfo->entries[3].signals[2].band, "B3");
+  EXPECT_DOUBLE_EQ(parsed->satsinfo->entries[3].signals[2].cn0_db_hz, 36.0);
+}
+
+TEST(UnicoreBinaryNavParser, ParsesRtcmstatusbPayload)
+{
+  UnicoreBinaryNavParser parser;
+  UnicoreBinaryFrame frame;
+  frame.message_id = 2125U;
+  frame.payload = make_rtcmstatusb_payload();
+
+  const auto parsed = parser.parse(frame);
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->rtcm_status.has_value());
+  EXPECT_EQ(parsed->sentence_type, "RTCMSTATUSB");
+  EXPECT_EQ(parsed->rtcm_status->message_id, 1124);
+  EXPECT_EQ(parsed->rtcm_status->message_count, 21186);
+  EXPECT_EQ(parsed->rtcm_status->base_station_id, 42);
+  EXPECT_EQ(parsed->rtcm_status->satellite_count, 21);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[1], 6);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[2], 11);
+  EXPECT_EQ(parsed->rtcm_status->observable_count[5], 21);
+}
+
 TEST(UnicoreBinaryNavParser, HybridSamplesMatchAsciiWithinTolerance)
 {
   Um982Parser ascii_parser;
@@ -346,6 +542,78 @@ TEST(UnicoreBinaryNavParser, HybridSamplesMatchAsciiWithinTolerance)
   EXPECT_NEAR(std::sqrt(binary_pvtsln->fix->covariance[0]),
               std::sqrt(ascii_pvtsln->fix->covariance[0]),
               1e-3);
+}
+
+TEST(UnicoreBinaryNavParser, HybridSatelliteAndRtcmSamplesMatchAsciiWithinTolerance)
+{
+  Um982Parser ascii_parser;
+  UnicoreBinaryNavParser binary_parser;
+
+  const auto ascii_bestsat = ascii_parser.parse_line(make_unicore_ascii(
+      "BESTSATA,41,GPS,FINE,2294,472312000,0,0,18,16;4,"
+      "GPS,19,GOOD,00000003,"
+      "GLONASS,57+9,GOOD,00000003,"
+      "GALILEO,12,GOOD,00000017,"
+      "BEIDOU,27,GOOD,00000005"));
+  const auto ascii_satsinfo = ascii_parser.parse_line(make_unicore_ascii(
+      "SATSINFOA,97,GPS,FINE,2294,472312000,0,0,18,16;4,2,0,0,0,7,"
+      "19,123,45,0,44,0,2,0,41,17,2,"
+      "57,210,33,1,39,5,1,"
+      "12,300,56,3,46,1,2,3,40,17,2,"
+      "27,150,28,4,42,0,3,4,38,17,3,4,36,21,3"));
+  const auto ascii_rtcm = ascii_parser.parse_line(make_unicore_ascii(
+      "RTCMSTATUSA,76,GPS,FINE,2219,392572000,0,0,18,187;1124,21186,42,21,0,6,11,0,0,21"));
+
+  UnicoreBinaryFrame bestsat_frame;
+  bestsat_frame.message_id = 1041U;
+  bestsat_frame.payload = make_bestsatb_payload();
+  UnicoreBinaryFrame satsinfo_frame;
+  satsinfo_frame.message_id = 2124U;
+  satsinfo_frame.payload = make_satsinfob_payload();
+  UnicoreBinaryFrame rtcm_frame;
+  rtcm_frame.message_id = 2125U;
+  rtcm_frame.payload = make_rtcmstatusb_payload();
+
+  const auto binary_bestsat = binary_parser.parse(bestsat_frame);
+  const auto binary_satsinfo = binary_parser.parse(satsinfo_frame);
+  const auto binary_rtcm = binary_parser.parse(rtcm_frame);
+
+  ASSERT_TRUE(ascii_bestsat.has_value() && ascii_bestsat->bestsat.has_value());
+  ASSERT_TRUE(ascii_satsinfo.has_value() && ascii_satsinfo->satsinfo.has_value());
+  ASSERT_TRUE(ascii_rtcm.has_value() && ascii_rtcm->rtcm_status.has_value());
+  ASSERT_TRUE(binary_bestsat.has_value() && binary_bestsat->bestsat.has_value());
+  ASSERT_TRUE(binary_satsinfo.has_value() && binary_satsinfo->satsinfo.has_value());
+  ASSERT_TRUE(binary_rtcm.has_value() && binary_rtcm->rtcm_status.has_value());
+
+  EXPECT_EQ(binary_bestsat->bestsat->entries.size(), ascii_bestsat->bestsat->entries.size());
+  EXPECT_EQ(binary_satsinfo->satsinfo->entries.size(), ascii_satsinfo->satsinfo->entries.size());
+  EXPECT_NEAR(mean_cn0(*binary_satsinfo->satsinfo), mean_cn0(*ascii_satsinfo->satsinfo), 1e-9);
+  EXPECT_EQ(binary_rtcm->rtcm_status->message_id, ascii_rtcm->rtcm_status->message_id);
+  EXPECT_EQ(binary_rtcm->rtcm_status->message_count, ascii_rtcm->rtcm_status->message_count);
+  EXPECT_EQ(binary_rtcm->rtcm_status->satellite_count, ascii_rtcm->rtcm_status->satellite_count);
+}
+
+TEST(UnicoreBinaryNavParser, RejectsTruncatedSatelliteAndRtcmPayloads)
+{
+  UnicoreBinaryNavParser parser;
+
+  UnicoreBinaryFrame bestsat_frame;
+  bestsat_frame.message_id = 1041U;
+  bestsat_frame.payload = make_bestsatb_payload();
+  bestsat_frame.payload.resize(7U);
+  EXPECT_FALSE(parser.parse(bestsat_frame).has_value());
+
+  UnicoreBinaryFrame satsinfo_frame;
+  satsinfo_frame.message_id = 2124U;
+  satsinfo_frame.payload = make_satsinfob_payload();
+  satsinfo_frame.payload.resize(14U);
+  EXPECT_FALSE(parser.parse(satsinfo_frame).has_value());
+
+  UnicoreBinaryFrame rtcm_frame;
+  rtcm_frame.message_id = 2125U;
+  rtcm_frame.payload = make_rtcmstatusb_payload();
+  rtcm_frame.payload.resize(20U);
+  EXPECT_FALSE(parser.parse(rtcm_frame).has_value());
 }
 
 TEST(UnicoreBinaryNavParser, TransportRejectsBadCrcBeforeParsing)

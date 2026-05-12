@@ -18,8 +18,11 @@ public:
   std::optional<ParsedSentence> parse(const UnicoreBinaryFrame& frame) const;
 
 private:
+  static std::optional<ParsedSentence> parse_bestsatb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_bestnavb(const UnicoreBinaryFrame& frame);
   static std::optional<ParsedSentence> parse_pvtslnb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_rtcmstatusb(const UnicoreBinaryFrame& frame);
+  static std::optional<ParsedSentence> parse_satsinfob(const UnicoreBinaryFrame& frame);
 };
 
 }  // namespace mowgli_unicore_gnss
