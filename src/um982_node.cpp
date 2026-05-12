@@ -22,6 +22,7 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/nav_sat_status.hpp>
 
+#include "mowgli_unicore_gnss/diagnostic_state.hpp"
 #include "mowgli_unicore_gnss/serial_port.hpp"
 #include "mowgli_unicore_gnss/um982_parser.hpp"
 #include <compass_msgs/msg/azimuth.hpp>
@@ -1026,6 +1027,17 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: satellites";
     s.hardware_id = "unicore_um982";
+    if (!enable_satellite_status_)
+    {
+      s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                             diagnostic_feed_state(enable_satellite_status_, false))));
+      s.values.push_back(kv("satellite_status_enabled", "False"));
+      s.values.push_back(kv("satsinfo_enabled", enable_satsinfo_ ? "True" : "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "satellite diagnostics disabled";
+      return s;
+    }
+
     const auto bestnav = active_bestnav();
     const auto bestsat = active_bestsat();
     const auto satsinfo = active_satsinfo();
@@ -1111,6 +1123,8 @@ private:
     }
 
     const int tracked = bestnav.has_value() ? bestnav->satellites_tracked : visible_total;
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                           diagnostic_feed_state(true, satsinfo.has_value() || !enable_satsinfo_))));
     s.values.push_back(kv("satellite_status_enabled", enable_satellite_status_ ? "True" : "False"));
     s.values.push_back(kv("satsinfo_enabled", enable_satsinfo_ ? "True" : "False"));
     s.values.push_back(kv("bestsat_available", bestsat.has_value() ? "True" : "False"));
@@ -1197,6 +1211,15 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: RTK";
     s.hardware_id = "unicore_um982";
+    if (!enable_rtk_status_)
+    {
+      s.values.push_back(kv("feed_state",
+                            diagnostic_feed_state_name(diagnostic_feed_state(false, false))));
+      s.values.push_back(kv("status_enabled", "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RTK diagnostics disabled";
+      return s;
+    }
 
     const auto bestnav = active_bestnav();
     const auto rtk_status = active_rtk_status();
@@ -1208,7 +1231,13 @@ private:
     const int quality = bestnav.has_value() ? bestnav->fix_quality
                                             : (rtk_status.has_value() ? rtk_status->fix_quality : 0);
 
-    s.values.push_back(kv("status_enabled", enable_rtk_status_ ? "True" : "False"));
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                           diagnostic_feed_state(true, bestnav.has_value()))));
+    s.values.push_back(kv("bestnav_state", diagnostic_feed_state_name(
+                                              diagnostic_feed_state(true, bestnav.has_value()))));
+    s.values.push_back(kv("rtkstatus_state", diagnostic_feed_state_name(
+                                                diagnostic_feed_state(true, rtk_status.has_value()))));
+    s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(
         kv("last_bestnav_age_s", std::isfinite(bestnav_age) ? to_string_or_nan(bestnav_age) : "inf"));
     s.values.push_back(kv("last_rtkstatus_age_s",
@@ -1271,12 +1300,7 @@ private:
       s.values.push_back(kv("qzss_source_mask", to_hex_word(rtk_status->qzss_source_mask)));
     }
 
-    if (!enable_rtk_status_)
-    {
-      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = "RTK status diagnostics disabled";
-    }
-    else if (!bestnav.has_value())
+    if (!bestnav.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
       s.message = "BESTNAVA stale or missing";
@@ -1416,6 +1440,15 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: rf";
     s.hardware_id = "unicore_um982";
+    if (!enable_rf_status_)
+    {
+      s.values.push_back(kv("feed_state",
+                            diagnostic_feed_state_name(diagnostic_feed_state(false, false))));
+      s.values.push_back(kv("status_enabled", "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "RF diagnostics disabled";
+      return s;
+    }
 
     const auto agc = active_agc();
     const double agc_age = latest_agc_.has_value() ? age_seconds(latest_agc_->received_at)
@@ -1433,7 +1466,9 @@ private:
     const bool rf_signal_low = std::isfinite(main_mean) && main_mean >= 80.0;
     const bool rf_saturation_suspected = main_min >= 0 && main_min <= 10;
 
-    s.values.push_back(kv("status_enabled", enable_rf_status_ ? "True" : "False"));
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                           diagnostic_feed_state(true, agc.has_value()))));
+    s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("agc_available", agc.has_value() ? "True" : "False"));
     s.values.push_back(
         kv("last_agc_age_s", std::isfinite(agc_age) ? to_string_or_nan(agc_age) : "inf"));
@@ -1457,12 +1492,7 @@ private:
       s.values.push_back(kv("agc_aux_l5", std::to_string(agc->antenna2[2])));
     }
 
-    if (!enable_rf_status_)
-    {
-      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = "RF diagnostics disabled";
-    }
-    else if (!agc.has_value())
+    if (!agc.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       s.message = "AGCA stale or missing";
@@ -1490,6 +1520,15 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: hardware";
     s.hardware_id = "unicore_um982";
+    if (!enable_hw_status_)
+    {
+      s.values.push_back(kv("feed_state",
+                            diagnostic_feed_state_name(diagnostic_feed_state(false, false))));
+      s.values.push_back(kv("status_enabled", "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "hardware diagnostics disabled";
+      return s;
+    }
 
     const auto hw = active_hw_status();
     const auto agc = active_agc();
@@ -1508,7 +1547,9 @@ private:
     const bool pll_ok = hw.has_value() && hw->pll_lock != 0;
     const bool hardware_ok = hw.has_value() && voltages_ok && clock_ok && pll_ok;
 
-    s.values.push_back(kv("status_enabled", enable_hw_status_ ? "True" : "False"));
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                           diagnostic_feed_state(true, hw.has_value()))));
+    s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("hwstatus_available", hw.has_value() ? "True" : "False"));
     s.values.push_back(
         kv("last_hwstatus_age_s", std::isfinite(hw_age) ? to_string_or_nan(hw_age) : "inf"));
@@ -1534,12 +1575,7 @@ private:
       s.values.push_back(kv("pll_status", "n/a"));
     }
 
-    if (!enable_hw_status_)
-    {
-      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = "hardware diagnostics disabled";
-    }
-    else if (!hw.has_value())
+    if (!hw.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       s.message = "HWSTATUSA stale or missing";
@@ -1572,6 +1608,15 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus s;
     s.name = "GPS: jamming";
     s.hardware_id = "unicore_um982";
+    if (!enable_jamming_status_)
+    {
+      s.values.push_back(kv("feed_state",
+                            diagnostic_feed_state_name(diagnostic_feed_state(false, false))));
+      s.values.push_back(kv("status_enabled", "False"));
+      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      s.message = "jamming diagnostics disabled";
+      return s;
+    }
 
     const auto jam = active_jam_status();
     const auto freq_jam = active_freq_jam_status();
@@ -1603,7 +1648,9 @@ private:
         freq_jam.has_value() ? (jammed_frequencies.empty() ? "none" : join_strings(jammed_frequencies))
                              : "n/a";
 
-    s.values.push_back(kv("status_enabled", enable_jamming_status_ ? "True" : "False"));
+    s.values.push_back(kv("feed_state", diagnostic_feed_state_name(
+                                           diagnostic_feed_state(true, jam.has_value() || freq_jam.has_value()))));
+    s.values.push_back(kv("status_enabled", "True"));
     s.values.push_back(kv("jamstatus_available", jam.has_value() ? "True" : "False"));
     s.values.push_back(
         kv("freqjamstatus_available", freq_jam.has_value() ? "True" : "False"));
@@ -1633,12 +1680,7 @@ private:
       s.values.push_back(kv("jam_l5_flag", describe_jam_flag(freq_jam->cw_flag[2])));
     }
 
-    if (!enable_jamming_status_)
-    {
-      s.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      s.message = "jamming diagnostics disabled";
-    }
-    else if (!jam.has_value() && !freq_jam.has_value())
+    if (!jam.has_value() && !freq_jam.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       s.message = "JAMSTATUSA/FREQJAMSTATUSA stale or missing";
@@ -1707,23 +1749,11 @@ private:
     const auto fix = active_fix();
     array.status.push_back(gps_fix_status(fix));
     array.status.push_back(gps_satellites_status());
-    if (enable_rtk_status_)
-    {
-      array.status.push_back(gps_rtk_status());
-    }
+    array.status.push_back(gps_rtk_status());
     array.status.push_back(gps_ntrip_status());
-    if (enable_rf_status_)
-    {
-      array.status.push_back(gps_rf_status());
-    }
-    if (enable_hw_status_)
-    {
-      array.status.push_back(gps_hardware_status());
-    }
-    if (enable_jamming_status_)
-    {
-      array.status.push_back(gps_jamming_status());
-    }
+    array.status.push_back(gps_rf_status());
+    array.status.push_back(gps_hardware_status());
+    array.status.push_back(gps_jamming_status());
     array.status.push_back(gps_parser_status());
     diagnostics_pub_->publish(array);
   }

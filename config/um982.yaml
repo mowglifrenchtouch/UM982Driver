@@ -10,3 +10,14 @@ um982_node:
     heading_topic: /gps/azimuth
     diagnostics_topic: /gps/diagnostics
     rtcm_topic: /ntrip_client/rtcm
+    rtcm_timeout_sec: 5.0
+    max_diff_age_sec: 5.0
+    enable_rtk_status: true
+    enable_rtcm_status: true
+    enable_satellite_status: false
+    enable_satsinfo: false
+    satellite_diag_timeout_sec: 5.0
+    enable_rf_status: false
+    enable_hw_status: false
+    enable_jamming_status: false
+    rf_diag_timeout_sec: 5.0

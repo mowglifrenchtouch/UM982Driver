@@ -78,6 +78,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_um982_parser
     ${PROJECT_NAME}_core
   )
+
+  ament_add_gtest(test_diagnostic_state
+    test/test_diagnostic_state.cpp
+  )
 endif()
 
 ament_export_include_directories(include)
