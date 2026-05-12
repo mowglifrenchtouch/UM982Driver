@@ -96,31 +96,40 @@ TEST(Um982Parser, ParsesPvtslnaFixWithRtkFixed)
   // Indices: 0=PVTSLNA, 1=port, 2=time_sys, 3=time_status, 4=gnss_week,
   // 5=gnss_seconds, 6-7=status, 8=leap_sec, 9=`<rx_sw>;<pos_type>`,
   // 10=altitude, 11=lat, 12=lon, 13-15=stddevs.
+
   Um982Parser parser;
   const auto parsed = parser.parse_line(make_unicore(
-      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_INT,"
-      "101.25,48.12345678901,2.34567890123,0.30,0.10,0.20"));
+      "PVTSLNA,97,GPS,FINE,2190,364536000,0,0,18,13;NARROW_INT,"
+      "60.5060,40.07898130522,116.23663134427,4.3353,1.8063,1.8796,"
+      "0.000,SINGLE,60.5060,40.07898130522,116.23663134427,-8.4923,"
+      "46,28,46,28,0.0009,-0.0031,0.0032,NONE,0.0000,0.0000,0.0000,"
+      "0,0,0,0,2.1753,1.3480,0.6840,1.8392,1.7072,5.0,28,25"));
 
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->fix.has_value());
   EXPECT_EQ(parsed->sentence_type, "PVTSLNA");
   EXPECT_TRUE(parsed->fix->valid_fix);
   EXPECT_EQ(parsed->fix->fix_quality, 4);
-  EXPECT_NEAR(parsed->fix->latitude_deg, 48.12345678901, 1e-12);
-  EXPECT_NEAR(parsed->fix->longitude_deg, 2.34567890123, 1e-12);
-  EXPECT_NEAR(parsed->fix->altitude_m, 101.25, 1e-12);
+  EXPECT_EQ(parsed->fix->satellites, 28);
+  EXPECT_NEAR(parsed->fix->latitude_deg, 40.07898130522, 1e-12);
+  EXPECT_NEAR(parsed->fix->longitude_deg, 116.23663134427, 1e-12);
+  EXPECT_NEAR(parsed->fix->altitude_m, 52.0137, 1e-9);
+  EXPECT_NEAR(parsed->fix->hdop, 0.6840, 1e-9);
   EXPECT_TRUE(parsed->fix->has_covariance);
-  EXPECT_NEAR(parsed->fix->covariance[0], 0.04, 1e-12);
-  EXPECT_NEAR(parsed->fix->covariance[4], 0.01, 1e-12);
-  EXPECT_NEAR(parsed->fix->covariance[8], 0.09, 1e-12);
+  EXPECT_NEAR(parsed->fix->covariance[0], 1.8796 * 1.8796, 1e-9);
+  EXPECT_NEAR(parsed->fix->covariance[4], 1.8063 * 1.8063, 1e-9);
+  EXPECT_NEAR(parsed->fix->covariance[8], 4.3353 * 4.3353, 1e-9);
 }
 
 TEST(Um982Parser, ParsesPvtslnaFloatRtk)
 {
   Um982Parser parser;
   const auto parsed = parser.parse_line(make_unicore(
-      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_FLOAT,"
-      "101.25,48.0,2.0,0.3,0.1,0.2"));
+      "PVTSLNA,97,GPS,FINE,2190,364536000,0,0,18,13;NARROW_FLOAT,"
+      "60.5060,40.07898130522,116.23663134427,4.3353,1.8063,1.8796,"
+      "1.250,SINGLE,60.5060,40.07898130522,116.23663134427,-8.4923,"
+      "46,28,46,28,0.0009,-0.0031,0.0032,NONE,0.0000,0.0000,0.0000,"
+      "0,0,0,0,2.1753,1.3480,0.6840,1.8392,1.7072,5.0,28,25"));
 
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->fix.has_value());
@@ -135,8 +144,11 @@ TEST(Um982Parser, ParsesPvtslnaNumericPositionType)
   // after the `;` in field 9.
   Um982Parser parser;
   const auto parsed = parser.parse_line(make_unicore(
-      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;50,"
-      "101.25,48.0,2.0,0.3,0.1,0.2"));
+      "PVTSLNA,97,GPS,FINE,2190,364536000,0,0,18,13;50,"
+      "60.5060,40.07898130522,116.23663134427,4.3353,1.8063,1.8796,"
+      "0.000,SINGLE,60.5060,40.07898130522,116.23663134427,-8.4923,"
+      "46,28,46,28,0.0009,-0.0031,0.0032,NONE,0.0000,0.0000,0.0000,"
+      "0,0,0,0,2.1753,1.3480,0.6840,1.8392,1.7072,5.0,28,25"));
 
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->fix.has_value());
@@ -148,8 +160,11 @@ TEST(Um982Parser, ParsesPvtslnaNoFixWhenPositionTypeNone)
 {
   Um982Parser parser;
   const auto parsed = parser.parse_line(make_unicore(
-      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NONE,"
-      "101.25,48.0,2.0,0.3,0.1,0.2"));
+      "PVTSLNA,97,GPS,FINE,2190,364536000,0,0,18,13;NONE,"
+      "60.5060,40.07898130522,116.23663134427,4.3353,1.8063,1.8796,"
+      "0.000,SINGLE,60.5060,40.07898130522,116.23663134427,-8.4923,"
+      "46,28,46,28,0.0009,-0.0031,0.0032,NONE,0.0000,0.0000,0.0000,"
+      "0,0,0,0,2.1753,1.3480,0.6840,1.8392,1.7072,5.0,28,25"));
 
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->fix.has_value());

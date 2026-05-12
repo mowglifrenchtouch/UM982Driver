@@ -294,24 +294,17 @@ private:
 
   std::optional<FixData> active_fix() const
   {
-    if (latest_pvtslna_fix_.has_value() && is_fresh(latest_pvtslna_fix_->received_at))
-    {
-      // PVTSLNA position + covariance is what we want, but its
+    if (latest_pvtslna_fix_.has_value() && latest_pvtslna_fix_->data.valid_fix &&
+        is_fresh(latest_pvtslna_fix_->received_at))
+     // PVTSLNA position + covariance is what we want, but its
       // position-type string isn't always recognised by
       // position_type_to_gga_quality() on every firmware revision —
       // when that happens fix_quality lands at 0 (NONE) even though
       // the receiver clearly has a fix. Graft GGA's quality onto the
       // PVTSLNA fix so downstream NavSatStatus and the carr_soln
       // diagnostic both see the right value.
-      FixData out = latest_pvtslna_fix_->data;
-      if (out.fix_quality <= 0 && latest_gga_fix_.has_value() &&
-          is_fresh(latest_gga_fix_->received_at) &&
-          latest_gga_fix_->data.fix_quality > 0)
-      {
-        out.fix_quality = latest_gga_fix_->data.fix_quality;
-        out.valid_fix = true;
-      }
-      return out;
+    {
+      return latest_pvtslna_fix_->data;
     }
     if (latest_gga_fix_.has_value() && latest_gga_fix_->data.valid_fix &&
         is_fresh(latest_gga_fix_->received_at))
@@ -357,10 +350,11 @@ private:
         status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
         break;
       case 2:
-      case 5:
+      case 9:
         status.status = sensor_msgs::msg::NavSatStatus::STATUS_SBAS_FIX;
         break;
       case 4:
+      case 5:
         status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
         break;
       default:

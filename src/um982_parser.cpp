@@ -18,13 +18,7 @@ namespace mowgli_unicore_gnss
 namespace
 {
 
-constexpr std::size_t kPvtslnaAltitudeIndex = 10;
-constexpr std::size_t kPvtslnaLatitudeIndex = 11;
-constexpr std::size_t kPvtslnaLongitudeIndex = 12;
-constexpr std::size_t kPvtslnaAltitudeStdIndex = 13;
-constexpr std::size_t kPvtslnaLatitudeStdIndex = 14;
-constexpr std::size_t kPvtslnaLongitudeStdIndex = 15;
-// PVTSLNA layout — empirically verified against UM982 firmware
+  // PVTSLNA layout — empirically verified against UM982 firmware
 // (real sample: `#PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_FLOAT,
 // 197.2120,43.59,0.90,0.2666,0.1021,0.2038,...`).
 //
@@ -43,6 +37,23 @@ constexpr std::size_t kPvtslnaLongitudeStdIndex = 15;
 // ros2) that omitted the same prefix and matched a different firmware
 // revision. The data-field offsets (altitude at +3 etc.) are stable.
 constexpr std::size_t kPvtslnaPositionTypeIndex = 9;
+constexpr std::size_t kPvtslnaBestposHeightIndex = 10;
+constexpr std::size_t kPvtslnaBestposLatitudeIndex = 11;
+constexpr std::size_t kPvtslnaBestposLongitudeIndex = 12;
+constexpr std::size_t kPvtslnaBestposHeightStdIndex = 13;
+constexpr std::size_t kPvtslnaBestposLatitudeStdIndex = 14;
+constexpr std::size_t kPvtslnaBestposLongitudeStdIndex = 15;
+constexpr std::size_t kPvtslnaUndulationIndex = 21;
+constexpr std::size_t kPvtslnaBestposTrackedSvsIndex = 22;
+constexpr std::size_t kPvtslnaBestposSolutionSvsIndex = 23;
+constexpr std::size_t kPvtslnaHdopIndex = 39;
+// N4 R1.4 PVTSLNA layout:
+//   #PVTSLNA,<ascii_header>;bestpos_type,bestpos_hgt,bestpos_lat,...
+//
+// The Unicore ASCII header is comma-separated and the first data field is
+// attached to the last header token through `;`, so a comma-only split
+// yields `<delay_ms>;<bestpos_type>` at index 9. The following indices are
+// then aligned with Table 7-82 from the N4 R1.4 manual.
 
 uint32_t crc32_unicore(std::string_view text)
 {
@@ -379,24 +390,24 @@ std::optional<ParsedSentence> Um982Parser::parse_hpr(const std::vector<std::stri
 std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
     const std::vector<std::string_view>& fields)
 {
-  if (fields.size() <= kPvtslnaLongitudeStdIndex)
+  if (fields.size() <= kPvtslnaBestposLongitudeStdIndex)
   {
     return std::nullopt;
   }
 
-  double altitude = 0.0;
+  double bestpos_height_msl = 0.0;
   double latitude = 0.0;
   double longitude = 0.0;
   double altitude_std = 0.0;
   double latitude_std = 0.0;
   double longitude_std = 0.0;
 
-  if (!parse_double(fields[kPvtslnaAltitudeIndex], altitude) ||
-      !parse_double(fields[kPvtslnaLatitudeIndex], latitude) ||
-      !parse_double(fields[kPvtslnaLongitudeIndex], longitude) ||
-      !parse_double(fields[kPvtslnaAltitudeStdIndex], altitude_std) ||
-      !parse_double(fields[kPvtslnaLatitudeStdIndex], latitude_std) ||
-      !parse_double(fields[kPvtslnaLongitudeStdIndex], longitude_std))
+  if (!parse_double(fields[kPvtslnaBestposHeightIndex], bestpos_height_msl) ||
+      !parse_double(fields[kPvtslnaBestposLatitudeIndex], latitude) ||
+      !parse_double(fields[kPvtslnaBestposLongitudeIndex], longitude) ||
+      !parse_double(fields[kPvtslnaBestposHeightStdIndex], altitude_std) ||
+      !parse_double(fields[kPvtslnaBestposLatitudeStdIndex], latitude_std) ||
+      !parse_double(fields[kPvtslnaBestposLongitudeStdIndex], longitude_std))
   {
     return std::nullopt;
   }
@@ -409,6 +420,7 @@ std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
   // receiver may still emit covariance on the PVTSLNA stream during
   // cold-start, and downstream consumers gate on NavSatStatus.status
   // not on valid_fix.
+  
   std::string_view pos_type_field = fields[kPvtslnaPositionTypeIndex];
   const std::size_t semi = pos_type_field.find(';');
   if (semi != std::string_view::npos)
@@ -416,6 +428,28 @@ std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
     pos_type_field = pos_type_field.substr(semi + 1U);
   }
   const int quality = position_type_to_gga_quality(pos_type_field);
+
+  double undulation = 0.0;
+  const bool undulation_ok = fields.size() > kPvtslnaUndulationIndex &&
+                             parse_double(fields[kPvtslnaUndulationIndex], undulation);
+
+  int tracked_satellites = -1;
+  if (fields.size() > kPvtslnaBestposTrackedSvsIndex)
+  {
+    (void)parse_int(fields[kPvtslnaBestposTrackedSvsIndex], tracked_satellites);
+  }
+
+  int solution_satellites = -1;
+  if (fields.size() > kPvtslnaBestposSolutionSvsIndex)
+  {
+    (void)parse_int(fields[kPvtslnaBestposSolutionSvsIndex], solution_satellites);
+  }
+
+  double hdop = -1.0;
+  if (fields.size() > kPvtslnaHdopIndex)
+  {
+    (void)parse_double(fields[kPvtslnaHdopIndex], hdop);
+  }
 
   ParsedSentence sentence;
   sentence.sentence_type = "PVTSLNA";
@@ -425,7 +459,12 @@ std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
   sentence.fix->fix_quality = quality;
   sentence.fix->latitude_deg = latitude;
   sentence.fix->longitude_deg = longitude;
-  sentence.fix->altitude_m = altitude;
+  // PVTSLN bestpos_hgt is height above mean sea level. Convert to
+  // ellipsoid height when undulation is available so NavSatFix matches
+  // the existing GGA path.
+  sentence.fix->altitude_m = bestpos_height_msl + (undulation_ok ? undulation : 0.0);
+  sentence.fix->satellites = solution_satellites >= 0 ? solution_satellites : tracked_satellites;
+  sentence.fix->hdop = hdop;
   sentence.fix->has_covariance = true;
   sentence.fix->covariance.fill(0.0);
   sentence.fix->covariance[0] = longitude_std * longitude_std;
@@ -497,23 +536,26 @@ std::optional<ParsedSentence> Um982Parser::parse_gsv(
 
 int Um982Parser::position_type_to_gga_quality(std::string_view text)
 {
-  // String form — what UM98x emits in PVTSLNA / BESTPOSA when configured
-  // for ASCII output. Codes mirror the NovAtel/Unicore BESTPOSA spec.
+  // String form from Table 0-4 in the N4 R1.4 manual.
   if (text == "NONE") return 0;
   if (text == "FIXEDPOS" || text == "FIXEDHEIGHT") return 1;
   if (text == "SINGLE") return 1;
   if (text == "PSRDIFF" || text == "DGPS") return 2;
   if (text == "WAAS" || text == "SBAS") return 9;
-  if (text == "L1_FLOAT" || text == "NARROW_FLOAT" || text == "RTK_FLOAT") return 5;
+  if (text == "L1_FLOAT" || text == "IONOFREE_FLOAT" || text == "NARROW_FLOAT" ||
+      text == "RTK_FLOAT")
+  {
+    return 5;
+  }
   if (text == "L1_INT" || text == "WIDE_INT" || text == "NARROW_INT" || text == "RTK_FIXED") return 4;
+  if (text == "INS") return 1;
   if (text == "INS_PSRSP") return 1;
   if (text == "INS_PSRDIFF") return 2;
   if (text == "INS_RTKFLOAT") return 5;
   if (text == "INS_RTKFIXED") return 4;
+  if (text == "PPP_CONVERGING" || text == "PPP") return 1;
 
-  // Numeric form — some firmware variants emit BESTPOSA position-type
-  // as the underlying enum code rather than a string. Codes from the
-  // Unicore/NovAtel reference manual, BESTPOSA log section.
+  // Numeric form from Table 0-4 in the N4 R1.4 manual.
   int code = 0;
   if (parse_int(text, code))
   {
@@ -526,14 +568,18 @@ int Um982Parser::position_type_to_gga_quality(std::string_view text)
       case 17: return 2;   // PSRDIFF
       case 18: return 9;   // WAAS / SBAS
       case 32:
-      case 34: return 5;   // L1_FLOAT / NARROW_FLOAT
+      case 33:
+      case 34: return 5;   // L1_FLOAT / IONOFREE_FLOAT / NARROW_FLOAT
       case 48:
       case 49:
       case 50: return 4;   // L1_INT / WIDE_INT / NARROW_INT
+      case 52: return 1;   // INS
       case 53: return 1;   // INS_PSRSP
       case 54: return 2;   // INS_PSRDIFF
       case 55: return 5;   // INS_RTKFLOAT
       case 56: return 4;   // INS_RTKFIXED
+      case 68:
+      case 69: return 1;   // PPP_CONVERGING / PPP
       default: return 0;
     }
   }
