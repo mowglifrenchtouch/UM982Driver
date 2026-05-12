@@ -58,12 +58,22 @@ struct VelocityData
   double vertical_std_mps{0.0};
 };
 
+struct GsvData
+{
+  // Two-letter NMEA talker prefix carried verbatim from the GSV
+  // sentence ("GP", "GL", "GA", "GB", "GQ", "GI", "GN"). Used as a
+  // constellation key in the node's per-constellation tally.
+  std::string talker;
+  int satellites_in_view{0};
+};
+
 struct ParsedSentence
 {
   std::string sentence_type;
   std::optional<FixData> fix;
   std::optional<HeadingData> heading;
   std::optional<VelocityData> velocity;
+  std::optional<GsvData> gsv;
 };
 
 class Um982Parser
@@ -88,6 +98,14 @@ private:
   static std::optional<ParsedSentence> parse_hpr(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_pvtslna(const std::vector<std::string_view>& fields);
   static std::optional<ParsedSentence> parse_bestnava(const std::vector<std::string_view>& fields);
+  static std::optional<ParsedSentence> parse_gsv(std::string_view talker,
+                                                 const std::vector<std::string_view>& fields);
+
+  // Map a Unicore BESTPOSA-style position-type field (string like
+  // "NARROW_INT" or numeric code like "50") to the equivalent NMEA GGA
+  // quality value (0-9). Returns 0 when the input is empty or unknown,
+  // matching NMEA quality 0 = no fix.
+  static int position_type_to_gga_quality(std::string_view text);
 };
 
 }  // namespace mowgli_unicore_gnss

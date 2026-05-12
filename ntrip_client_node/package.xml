@@ -15,6 +15,7 @@
   <depend>rclcpp_components</depend>
   <depend>libcurl-dev</depend>
   <depend>rtcm_msgs</depend>
+  <depend>sensor_msgs</depend>
   <exec_depend>std_msgs</exec_depend>
   <build_depend>pkg-config</build_depend>
 

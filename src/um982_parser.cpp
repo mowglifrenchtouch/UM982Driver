@@ -24,6 +24,25 @@ constexpr std::size_t kPvtslnaLongitudeIndex = 12;
 constexpr std::size_t kPvtslnaAltitudeStdIndex = 13;
 constexpr std::size_t kPvtslnaLatitudeStdIndex = 14;
 constexpr std::size_t kPvtslnaLongitudeStdIndex = 15;
+// PVTSLNA layout — empirically verified against UM982 firmware
+// (real sample: `#PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_FLOAT,
+// 197.2120,43.59,0.90,0.2666,0.1021,0.2038,...`).
+//
+// Header is 10 comma-separated tokens (PVTSLNA, port, time_sys,
+// time_status, gnss_week, gnss_seconds, status_a, status_b, leap_sec,
+// rx_sw_version) terminated by `;`. The first data token (position-type,
+// e.g. NARROW_INT / NARROW_FLOAT / PSRDIFF / NONE) is glued to the last
+// header token via `;` — so a `,`-only split surfaces it as
+// `"<rx_sw_version>;<position_type>"` at index 9. parse_pvtslna() peels
+// the prefix off via find(';').
+//
+// After the position-type token, data continues: altitude (idx 10),
+// latitude (11), longitude (12), height_std/lat_std/lon_std (13-15).
+// The 7-field-header constant we used previously came from older
+// Python references (sunshineharry/UM982Driver, lostDeers/UM982Driver-
+// ros2) that omitted the same prefix and matched a different firmware
+// revision. The data-field offsets (altitude at +3 etc.) are stable.
+constexpr std::size_t kPvtslnaPositionTypeIndex = 9;
 
 uint32_t crc32_unicore(std::string_view text)
 {
@@ -89,6 +108,15 @@ std::optional<ParsedSentence> Um982Parser::parse_line(const std::string& line) c
     if (suffix == "HPR")
     {
       return parse_hpr(fields);
+    }
+    if (suffix == "GSV")
+    {
+      // GSV talker prefix is the first two chars of the sentence id
+      // ($GPGSV, $GLGSV, $GAGSV, $GBGSV, $GQGSV, $GIGSV, $GNGSV).
+      const std::string_view first = fields.front();
+      const std::string talker = first.size() >= 5U ? std::string(first.substr(0U, 2U))
+                                                    : std::string("GN");
+      return parse_gsv(talker, fields);
     }
     return std::nullopt;
   }
@@ -373,11 +401,28 @@ std::optional<ParsedSentence> Um982Parser::parse_pvtslna(
     return std::nullopt;
   }
 
+  // Map the position-type field (string or numeric) to an NMEA GGA
+  // quality code. The Unicore header/data separator `;` glues the last
+  // header token to the first data token in a `,`-only split — so peel
+  // the prefix off if present (real-world: `"20;NARROW_FLOAT"` → `"NARROW_FLOAT"`).
+  // Quality 0 means "no fix" — accept the position anyway because the
+  // receiver may still emit covariance on the PVTSLNA stream during
+  // cold-start, and downstream consumers gate on NavSatStatus.status
+  // not on valid_fix.
+  std::string_view pos_type_field = fields[kPvtslnaPositionTypeIndex];
+  const std::size_t semi = pos_type_field.find(';');
+  if (semi != std::string_view::npos)
+  {
+    pos_type_field = pos_type_field.substr(semi + 1U);
+  }
+  const int quality = position_type_to_gga_quality(pos_type_field);
+
   ParsedSentence sentence;
   sentence.sentence_type = "PVTSLNA";
   sentence.fix = FixData{};
   sentence.fix->source = FixSource::kPvtslna;
-  sentence.fix->valid_fix = true;
+  sentence.fix->valid_fix = quality > 0;
+  sentence.fix->fix_quality = quality;
   sentence.fix->latitude_deg = latitude;
   sentence.fix->longitude_deg = longitude;
   sentence.fix->altitude_m = altitude;
@@ -423,6 +468,77 @@ std::optional<ParsedSentence> Um982Parser::parse_bestnava(
   sentence.velocity->horizontal_std_mps = horizontal_std;
   sentence.velocity->vertical_std_mps = vertical_std;
   return sentence;
+}
+
+std::optional<ParsedSentence> Um982Parser::parse_gsv(
+    std::string_view talker, const std::vector<std::string_view>& fields)
+{
+  // GSV layout: $<talker>GSV,<total_msgs>,<msg_num>,<sats_in_view>,...
+  // The total satellite count for this constellation is field 3, and
+  // is repeated identically across every fragment of the burst — only
+  // the first message of the burst is needed by the node aggregator.
+  if (fields.size() < 4U)
+  {
+    return std::nullopt;
+  }
+  int total_in_view = 0;
+  if (!parse_int(fields[3], total_in_view))
+  {
+    return std::nullopt;
+  }
+
+  ParsedSentence sentence;
+  sentence.sentence_type = "GSV";
+  sentence.gsv = GsvData{};
+  sentence.gsv->talker = std::string(talker);
+  sentence.gsv->satellites_in_view = total_in_view;
+  return sentence;
+}
+
+int Um982Parser::position_type_to_gga_quality(std::string_view text)
+{
+  // String form — what UM98x emits in PVTSLNA / BESTPOSA when configured
+  // for ASCII output. Codes mirror the NovAtel/Unicore BESTPOSA spec.
+  if (text == "NONE") return 0;
+  if (text == "FIXEDPOS" || text == "FIXEDHEIGHT") return 1;
+  if (text == "SINGLE") return 1;
+  if (text == "PSRDIFF" || text == "DGPS") return 2;
+  if (text == "WAAS" || text == "SBAS") return 9;
+  if (text == "L1_FLOAT" || text == "NARROW_FLOAT" || text == "RTK_FLOAT") return 5;
+  if (text == "L1_INT" || text == "WIDE_INT" || text == "NARROW_INT" || text == "RTK_FIXED") return 4;
+  if (text == "INS_PSRSP") return 1;
+  if (text == "INS_PSRDIFF") return 2;
+  if (text == "INS_RTKFLOAT") return 5;
+  if (text == "INS_RTKFIXED") return 4;
+
+  // Numeric form — some firmware variants emit BESTPOSA position-type
+  // as the underlying enum code rather than a string. Codes from the
+  // Unicore/NovAtel reference manual, BESTPOSA log section.
+  int code = 0;
+  if (parse_int(text, code))
+  {
+    switch (code)
+    {
+      case 0:  return 0;   // NONE
+      case 1:
+      case 2:  return 1;   // FIXEDPOS / FIXEDHEIGHT
+      case 16: return 1;   // SINGLE
+      case 17: return 2;   // PSRDIFF
+      case 18: return 9;   // WAAS / SBAS
+      case 32:
+      case 34: return 5;   // L1_FLOAT / NARROW_FLOAT
+      case 48:
+      case 49:
+      case 50: return 4;   // L1_INT / WIDE_INT / NARROW_INT
+      case 53: return 1;   // INS_PSRSP
+      case 54: return 2;   // INS_PSRDIFF
+      case 55: return 5;   // INS_RTKFLOAT
+      case 56: return 4;   // INS_RTKFIXED
+      default: return 0;
+    }
+  }
+
+  return 0;
 }
 
 }  // namespace mowgli_unicore_gnss

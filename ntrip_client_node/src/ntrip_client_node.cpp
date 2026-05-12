@@ -13,7 +13,9 @@
 // limitations under the License.
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -27,6 +29,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 #include "rtcm_msgs/msg/message.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "sensor_msgs/msg/nav_sat_status.hpp"
 #include <curl/curl.h>
 
 namespace ublox_dgnss
@@ -43,6 +47,68 @@ struct CurlHandle
     curl_easy_cleanup(handle);
   }
 };
+
+// Format a NavSatFix as an NMEA $GPGGA sentence suitable for the
+// Ntrip-GGA HTTP header (used by VRS / NEAR mountpoints to route to
+// the closest physical base station). Returns an empty string if the
+// fix is invalid (status STATUS_NO_FIX).
+inline std::string format_gga(const sensor_msgs::msg::NavSatFix &fix)
+{
+  if (fix.status.status < sensor_msgs::msg::NavSatStatus::STATUS_FIX)
+  {
+    return "";
+  }
+
+  std::time_t t = std::time(nullptr);
+  std::tm tm_utc{};
+  gmtime_r(&t, &tm_utc);
+
+  const double lat_abs = std::fabs(fix.latitude);
+  const int lat_deg = static_cast<int>(lat_abs);
+  const double lat_min = (lat_abs - lat_deg) * 60.0;
+  const double lon_abs = std::fabs(fix.longitude);
+  const int lon_deg = static_cast<int>(lon_abs);
+  const double lon_min = (lon_abs - lon_deg) * 60.0;
+  const char ns = fix.latitude >= 0.0 ? 'N' : 'S';
+  const char ew = fix.longitude >= 0.0 ? 'E' : 'W';
+
+  // Map NavSatStatus.status -> NMEA GGA quality. STATUS_GBAS_FIX is
+  // reported as quality 4 (RTK Fixed); STATUS_SBAS_FIX as 5 (RTK Float
+  // / DGPS — the caster doesn't care about the distinction between 2
+  // and 5 for routing); STATUS_FIX as 1 (SPS).
+  int quality = 1;
+  if (fix.status.status == sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX)
+  {
+    quality = 4;
+  }
+  else if (fix.status.status == sensor_msgs::msg::NavSatStatus::STATUS_SBAS_FIX)
+  {
+    quality = 5;
+  }
+
+  char body[192];
+  const int n = std::snprintf(
+      body, sizeof(body),
+      "GPGGA,%02d%02d%02d.00,%02d%07.4f,%c,%03d%07.4f,%c,%d,10,1.0,%.1f,M,0.0,M,,",
+      tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec,
+      lat_deg, lat_min, ns,
+      lon_deg, lon_min, ew,
+      quality,
+      fix.altitude);
+  if (n <= 0)
+  {
+    return "";
+  }
+
+  std::uint8_t cs = 0;
+  for (int i = 0; i < n; ++i)
+  {
+    cs ^= static_cast<std::uint8_t>(body[i]);
+  }
+  char out[224];
+  std::snprintf(out, sizeof(out), "$%s*%02X", body, cs);
+  return std::string(out);
+}
 
 class NTRIPClientNode : public rclcpp::Node
 {
@@ -62,6 +128,11 @@ public:
     declare_parameter("password", "password");
     declare_parameter("log_level", "INFO");
     declare_parameter("maxage_conn", 30);
+    // VRS / NEAR-style mountpoints route to the closest physical base
+    // station based on the rover's NMEA GGA position. We subscribe to
+    // a NavSatFix topic and forward the latest fix as the Ntrip-GGA HTTP
+    // header on every connection. Set gga_fix_topic="" to disable.
+    declare_parameter("gga_fix_topic", "/gps/fix");
 
     use_https_ = get_parameter("use_https").as_bool();
     host_ = get_parameter("host").as_string();
@@ -71,6 +142,29 @@ public:
     password_ = get_parameter("password").as_string();
     log_level_ = get_parameter("log_level").as_string();
     maxage_conn_ = get_parameter("maxage_conn").as_int();
+    gga_fix_topic_ = get_parameter("gga_fix_topic").as_string();
+
+    if (!gga_fix_topic_.empty())
+    {
+      fix_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>(
+          gga_fix_topic_, rclcpp::SensorDataQoS(),
+          std::bind(&NTRIPClientNode::on_fix, this, std::placeholders::_1));
+      // Refresh the connection every 5 min so VRS / NEAR mountpoints
+      // re-pick the closest base after the rover has moved. For static
+      // installs this just keeps the connection alive — cheap.
+      gga_refresh_timer_ = create_wall_timer(
+          std::chrono::minutes(5),
+          [this]() {
+            std::lock_guard<std::mutex> lock(gga_mutex_);
+            if (!latest_gga_.empty())
+            {
+              reconfigure_needed_.store(true);
+            }
+          });
+      RCLCPP_INFO(get_logger(),
+                  "GGA forwarding enabled — subscribing to %s",
+                  gga_fix_topic_.c_str());
+    }
 
     pending_use_https_ = use_https_;
     pending_host_ = host_;
@@ -116,9 +210,40 @@ public:
     {
       streaming_thread_.join();
     }
+    if (gga_header_list_ != nullptr)
+    {
+      curl_slist_free_all(gga_header_list_);
+      gga_header_list_ = nullptr;
+    }
     curl_handle_.reset();
     curl_global_cleanup();
     RCLCPP_INFO(get_logger(), "finished");
+  }
+
+  void on_fix(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
+  {
+    const std::string gga = format_gga(*msg);
+    if (gga.empty())
+    {
+      return;
+    }
+    bool first_fix = false;
+    {
+      std::lock_guard<std::mutex> lock(gga_mutex_);
+      first_fix = latest_gga_.empty();
+      latest_gga_ = gga;
+    }
+    if (first_fix)
+    {
+      // The connection opened in the constructor with an empty GGA
+      // (no fix yet at startup), so VRS / NEAR mountpoints couldn't
+      // pick a base. Trigger reconfigure so the next streaming cycle
+      // re-runs apply_curl_options() with the freshly populated
+      // Ntrip-GGA header.
+      RCLCPP_INFO(get_logger(),
+                  "First GGA available — forcing NTRIP reconnect to send Ntrip-GGA header");
+      reconfigure_needed_.store(true);
+    }
   }
 
 private:
@@ -206,6 +331,26 @@ private:
     curl_easy_setopt(handle, CURLOPT_USERPWD, userpwd.c_str());
     curl_easy_setopt(handle, CURLOPT_VERBOSE, log_level_ != "INFO" ? 1L : 0L);
     curl_easy_setopt(handle, CURLOPT_MAXAGE_CONN, maxage_conn_);
+
+    // (Re)build the Ntrip-* HTTP header list. Ntrip-Version: Ntrip/2.0
+    // is required for full NTRIP 2.0 compliance with crtk.net and most
+    // modern casters. Ntrip-GGA carries the rover's NMEA GGA so VRS /
+    // NEAR mountpoints can route to the closest physical base station.
+    if (gga_header_list_ != nullptr)
+    {
+      curl_slist_free_all(gga_header_list_);
+      gga_header_list_ = nullptr;
+    }
+    gga_header_list_ = curl_slist_append(gga_header_list_, "Ntrip-Version: Ntrip/2.0");
+    {
+      std::lock_guard<std::mutex> lock(gga_mutex_);
+      if (!latest_gga_.empty())
+      {
+        const std::string h = "Ntrip-GGA: " + latest_gga_;
+        gga_header_list_ = curl_slist_append(gga_header_list_, h.c_str());
+      }
+    }
+    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, gga_header_list_);
   }
 
   static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata)
@@ -325,6 +470,14 @@ private:
   long maxage_conn_{30};
 
   rclcpp::Publisher<rtcm_msgs::msg::Message>::SharedPtr rtcm_pub_;
+
+  // GGA forwarding for VRS / NEAR mountpoints.
+  std::string gga_fix_topic_;
+  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr fix_sub_;
+  rclcpp::TimerBase::SharedPtr gga_refresh_timer_;
+  std::mutex gga_mutex_;
+  std::string latest_gga_;            // protected by gga_mutex_
+  curl_slist *gga_header_list_{nullptr};
 };
 
 }  // namespace ublox_dgnss

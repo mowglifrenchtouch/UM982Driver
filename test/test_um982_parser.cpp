@@ -87,16 +87,25 @@ TEST(Um982Parser, ParsesHprHeading)
   EXPECT_NEAR(*parsed->heading->roll_deg, 0.50, 1e-6);
 }
 
-TEST(Um982Parser, ParsesPvtslnaFix)
+TEST(Um982Parser, ParsesPvtslnaFixWithRtkFixed)
 {
+  // Real UM982 PVTSLNA layout: 10-token header followed by `;`, then
+  // data starts. A `,`-only split surfaces the position-type as the
+  // suffix of field 9 (`"<rx_sw>;<position_type>"`). parse_pvtslna
+  // peels the prefix off via find(';').
+  // Indices: 0=PVTSLNA, 1=port, 2=time_sys, 3=time_status, 4=gnss_week,
+  // 5=gnss_seconds, 6-7=status, 8=leap_sec, 9=`<rx_sw>;<pos_type>`,
+  // 10=altitude, 11=lat, 12=lon, 13-15=stddevs.
   Um982Parser parser;
   const auto parsed = parser.parse_line(make_unicore(
-      "PVTSLNA,foo,bar,baz,0,0,0,0,0,0,101.25,48.12345678901,2.34567890123,0.30,0.10,0.20"));
+      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_INT,"
+      "101.25,48.12345678901,2.34567890123,0.30,0.10,0.20"));
 
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->fix.has_value());
   EXPECT_EQ(parsed->sentence_type, "PVTSLNA");
   EXPECT_TRUE(parsed->fix->valid_fix);
+  EXPECT_EQ(parsed->fix->fix_quality, 4);
   EXPECT_NEAR(parsed->fix->latitude_deg, 48.12345678901, 1e-12);
   EXPECT_NEAR(parsed->fix->longitude_deg, 2.34567890123, 1e-12);
   EXPECT_NEAR(parsed->fix->altitude_m, 101.25, 1e-12);
@@ -104,6 +113,79 @@ TEST(Um982Parser, ParsesPvtslnaFix)
   EXPECT_NEAR(parsed->fix->covariance[0], 0.04, 1e-12);
   EXPECT_NEAR(parsed->fix->covariance[4], 0.01, 1e-12);
   EXPECT_NEAR(parsed->fix->covariance[8], 0.09, 1e-12);
+}
+
+TEST(Um982Parser, ParsesPvtslnaFloatRtk)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NARROW_FLOAT,"
+      "101.25,48.0,2.0,0.3,0.1,0.2"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->fix.has_value());
+  EXPECT_TRUE(parsed->fix->valid_fix);
+  EXPECT_EQ(parsed->fix->fix_quality, 5);  // float RTK -> NMEA quality 5
+}
+
+TEST(Um982Parser, ParsesPvtslnaNumericPositionType)
+{
+  // Some firmware variants emit BESTPOSA position-type as numeric code
+  // ("50" = NARROW_INT) instead of the string form. Position-type lives
+  // after the `;` in field 9.
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;50,"
+      "101.25,48.0,2.0,0.3,0.1,0.2"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->fix.has_value());
+  EXPECT_TRUE(parsed->fix->valid_fix);
+  EXPECT_EQ(parsed->fix->fix_quality, 4);
+}
+
+TEST(Um982Parser, ParsesPvtslnaNoFixWhenPositionTypeNone)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(make_unicore(
+      "PVTSLNA,78,GPS,FINE,2416,519196000,0,0,18,20;NONE,"
+      "101.25,48.0,2.0,0.3,0.1,0.2"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->fix.has_value());
+  EXPECT_FALSE(parsed->fix->valid_fix);
+  EXPECT_EQ(parsed->fix->fix_quality, 0);
+}
+
+TEST(Um982Parser, ParsesGsvSatellitesInView)
+{
+  Um982Parser parser;
+  const auto parsed = parser.parse_line(
+      make_nmea("GPGSV,3,1,12,01,40,083,46,02,17,308,41,03,52,210,42,04,71,047,46"));
+
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->gsv.has_value());
+  EXPECT_EQ(parsed->sentence_type, "GSV");
+  EXPECT_EQ(parsed->gsv->talker, "GP");
+  EXPECT_EQ(parsed->gsv->satellites_in_view, 12);
+}
+
+TEST(Um982Parser, ParsesGsvPerConstellationTalkers)
+{
+  Um982Parser parser;
+  const auto gl = parser.parse_line(make_nmea("GLGSV,1,1,07"));
+  const auto ga = parser.parse_line(make_nmea("GAGSV,1,1,10"));
+  const auto gb = parser.parse_line(make_nmea("GBGSV,1,1,08"));
+
+  ASSERT_TRUE(gl.has_value() && gl->gsv.has_value());
+  ASSERT_TRUE(ga.has_value() && ga->gsv.has_value());
+  ASSERT_TRUE(gb.has_value() && gb->gsv.has_value());
+  EXPECT_EQ(gl->gsv->talker, "GL");
+  EXPECT_EQ(gl->gsv->satellites_in_view, 7);
+  EXPECT_EQ(ga->gsv->talker, "GA");
+  EXPECT_EQ(ga->gsv->satellites_in_view, 10);
+  EXPECT_EQ(gb->gsv->talker, "GB");
+  EXPECT_EQ(gb->gsv->satellites_in_view, 8);
 }
 
 TEST(Um982Parser, ParsesBestnavaVelocity)

@@ -11,6 +11,7 @@ find_package(ament_cmake_test REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(rtcm_msgs REQUIRED)
 find_package(CURL REQUIRED)
 
@@ -27,6 +28,7 @@ target_compile_definitions(ntrip_client_components
 target_link_libraries(ntrip_client_components PUBLIC
   ${rtcm_msgs_TARGETS}
   ${std_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
   CURL::libcurl
   rclcpp::rclcpp
   rclcpp_components::component
