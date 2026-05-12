@@ -21,3 +21,7 @@ um982_node:
     enable_hw_status: false
     enable_jamming_status: false
     rf_diag_timeout_sec: 5.0
+    enable_unicore_binary: false
+    binary_parser_strict_crc: true
+    binary_max_frame_size: 4096
+    binary_debug_unknown_ids: false

@@ -24,6 +24,7 @@
 
 #include "mowgli_unicore_gnss/diagnostic_state.hpp"
 #include "mowgli_unicore_gnss/serial_port.hpp"
+#include "mowgli_unicore_gnss/unicore_transport.hpp"
 #include "mowgli_unicore_gnss/um982_parser.hpp"
 #include <compass_msgs/msg/azimuth.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -158,6 +159,22 @@ std::string join_strings(const std::vector<std::string>& values)
     joined += value;
   }
   return joined.empty() ? std::string("n/a") : joined;
+}
+
+std::string join_message_ids(const std::vector<uint16_t>& values)
+{
+  if (values.empty())
+  {
+    return "none";
+  }
+
+  std::vector<std::string> text;
+  text.reserve(values.size());
+  for (const uint16_t value : values)
+  {
+    text.emplace_back(std::to_string(value));
+  }
+  return join_strings(text);
 }
 
 std::string describe_gps_glo_bds2_signal_mask(int mask)
@@ -479,6 +496,13 @@ public:
     enable_hw_status_ = declare_parameter<bool>("enable_hw_status", true);
     enable_jamming_status_ = declare_parameter<bool>("enable_jamming_status", true);
     rf_diag_timeout_sec_ = declare_parameter<double>("rf_diag_timeout_sec", 5.0);
+    enable_unicore_binary_ = declare_parameter<bool>("enable_unicore_binary", false);
+    binary_parser_strict_crc_ = declare_parameter<bool>("binary_parser_strict_crc", true);
+    binary_max_frame_size_ =
+        static_cast<std::size_t>(std::max(256, declare_parameter<int>("binary_max_frame_size", 4096)));
+    binary_debug_unknown_ids_ = declare_parameter<bool>("binary_debug_unknown_ids", false);
+    transport_.set_options(
+        {enable_unicore_binary_, binary_parser_strict_crc_, binary_max_frame_size_});
 
     serial_.configure(port_, baudrate_);
 
@@ -502,7 +526,8 @@ public:
 
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
-                "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs",
+                "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs "
+                "binary=%s strict_crc=%s binary_max_frame=%zu",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
@@ -510,7 +535,10 @@ public:
                 rtcm_timeout_sec_,
                 max_diff_age_sec_,
                 satellite_diag_timeout_sec_,
-                rf_diag_timeout_sec_);
+                rf_diag_timeout_sec_,
+                enable_unicore_binary_ ? "true" : "false",
+                binary_parser_strict_crc_ ? "true" : "false",
+                binary_max_frame_size_);
   }
 
 private:
@@ -528,9 +556,8 @@ private:
       const ssize_t bytes_read = serial_.read(buffer, sizeof(buffer));
       if (bytes_read > 0)
       {
-        rx_buffer_.append(reinterpret_cast<const char*>(buffer),
-                          static_cast<std::size_t>(bytes_read));
-        drain_lines();
+        transport_.append(buffer, static_cast<std::size_t>(bytes_read));
+        drain_transport();
         continue;
       }
 
@@ -554,13 +581,14 @@ private:
       break;
     }
 
-    if (rx_buffer_.size() > 8192U)
+    const std::size_t max_buffer = std::max<std::size_t>(8192U, binary_max_frame_size_ * 2U);
+    if (transport_.buffered_bytes() > max_buffer)
     {
       RCLCPP_WARN_THROTTLE(get_logger(),
                            *get_clock(),
                            5000,
                            "Dropping oversized UM982 receive buffer");
-      rx_buffer_.clear();
+      transport_.clear();
     }
   }
 
@@ -581,7 +609,7 @@ private:
     if (serial_.open())
     {
       RCLCPP_INFO(get_logger(), "Opened UM982 serial port %s at %d baud", port_.c_str(), baudrate_);
-      rx_buffer_.clear();
+      transport_.clear();
     }
     else
     {
@@ -594,21 +622,18 @@ private:
     }
   }
 
-  void drain_lines()
+  void drain_transport()
   {
-    std::size_t newline = rx_buffer_.find('\n');
-    while (newline != std::string::npos)
+    for (auto& event : transport_.drain())
     {
-      std::string line = rx_buffer_.substr(0U, newline);
-      rx_buffer_.erase(0U, newline + 1U);
-
-      if (!line.empty() && line.back() == '\r')
+      if (event.kind == UnicoreTransportEventKind::kBinaryFrame && event.binary_frame.has_value())
       {
-        line.pop_back();
+        process_binary_frame(*event.binary_frame);
       }
-
-      process_line(line);
-      newline = rx_buffer_.find('\n');
+      else if (!event.ascii_line.empty())
+      {
+        process_line(event.ascii_line);
+      }
     }
   }
 
@@ -717,6 +742,28 @@ private:
       // fragment of a GSV burst, so the latest write is authoritative.
       gsv_counts_[parsed->gsv->talker] =
           TimedData<int>{parsed->gsv->satellites_in_view, received_at};
+    }
+  }
+
+  void process_binary_frame(const UnicoreBinaryFrame& frame)
+  {
+    const auto received_at = std::chrono::steady_clock::now();
+    last_binary_frame_time_ = received_at;
+
+    const auto dispatch = binary_dispatcher_.dispatch(frame);
+    if (binary_dispatcher_.counters().last_message_id.has_value())
+    {
+      last_binary_msg_id_ = *binary_dispatcher_.counters().last_message_id;
+    }
+
+    if (!dispatch.known_message && binary_debug_unknown_ids_)
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(),
+                           *get_clock(),
+                           5000,
+                           "Unknown Unicore binary message id %u (%zu-byte payload)",
+                           static_cast<unsigned int>(frame.message_id),
+                           frame.payload.size());
     }
   }
 
@@ -1715,6 +1762,17 @@ private:
         current.nmea_checksum_errors - parser_counters_snapshot_.nmea_checksum_errors;
     const std::size_t delta_unicore_crc =
         current.unicore_crc_errors - parser_counters_snapshot_.unicore_crc_errors;
+    const UnicoreBinaryTransportCounters binary_current = transport_.binary_counters();
+    const UnicoreBinaryDispatchCounters binary_dispatch = binary_dispatcher_.counters();
+    const std::size_t delta_binary_crc =
+        binary_current.crc_errors - binary_counters_snapshot_.crc_errors;
+    const std::size_t delta_binary_resync =
+        binary_current.resync_count - binary_counters_snapshot_.resync_count;
+    const std::size_t delta_binary_unknown =
+        binary_dispatch.unknown_frames - binary_unknown_frames_snapshot_;
+    const double binary_age =
+        last_binary_frame_time_.has_value() ? age_seconds(*last_binary_frame_time_)
+                                            : std::numeric_limits<double>::infinity();
 
     s.values.push_back(kv("parsed_sentences_total", std::to_string(current.parsed_sentences)));
     s.values.push_back(kv("parse_errors_total", std::to_string(current.parse_errors)));
@@ -1725,13 +1783,35 @@ private:
     s.values.push_back(kv("parse_errors_delta", std::to_string(delta_parse)));
     s.values.push_back(kv("nmea_checksum_errors_delta", std::to_string(delta_nmea_crc)));
     s.values.push_back(kv("unicore_crc_errors_delta", std::to_string(delta_unicore_crc)));
+    s.values.push_back(kv("binary_enabled", enable_unicore_binary_ ? "True" : "False"));
+    s.values.push_back(kv("binary_frames_total", std::to_string(binary_current.frames_total)));
+    s.values.push_back(kv("binary_crc_errors", std::to_string(binary_current.crc_errors)));
+    s.values.push_back(kv("binary_resync_count", std::to_string(binary_current.resync_count)));
+    s.values.push_back(kv("binary_unknown_frames_total",
+                          std::to_string(binary_dispatch.unknown_frames)));
+    s.values.push_back(
+        kv("binary_unknown_msg_ids", join_message_ids(binary_dispatch.recent_unknown_message_ids)));
+    s.values.push_back(
+        kv("binary_last_msg_id",
+           binary_dispatch.last_message_id.has_value()
+               ? std::to_string(*binary_dispatch.last_message_id)
+               : "n/a"));
+    s.values.push_back(
+        kv("binary_last_frame_age_s",
+           std::isfinite(binary_age) ? to_string_or_nan(binary_age) : "inf"));
+    s.values.push_back(kv("binary_crc_errors_delta", std::to_string(delta_binary_crc)));
+    s.values.push_back(kv("binary_resync_delta", std::to_string(delta_binary_resync)));
+    s.values.push_back(kv("binary_unknown_frames_delta", std::to_string(delta_binary_unknown)));
 
     parser_counters_snapshot_ = current;
+    binary_counters_snapshot_ = binary_current;
+    binary_unknown_frames_snapshot_ = binary_dispatch.unknown_frames;
 
-    if (delta_parse > 0U || delta_nmea_crc > 0U || delta_unicore_crc > 0U)
+    if (delta_parse > 0U || delta_nmea_crc > 0U || delta_unicore_crc > 0U ||
+        delta_binary_crc > 0U || delta_binary_resync > 0U || delta_binary_unknown > 0U)
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      s.message = "new parse/CRC errors observed";
+      s.message = "new parser or binary transport anomalies observed";
     }
     else
     {
@@ -1815,6 +1895,10 @@ private:
   bool enable_rf_status_{true};
   bool enable_hw_status_{true};
   bool enable_jamming_status_{true};
+  bool enable_unicore_binary_{false};
+  bool binary_parser_strict_crc_{true};
+  std::size_t binary_max_frame_size_{4096U};
+  bool binary_debug_unknown_ids_{false};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -1822,7 +1906,8 @@ private:
 
   SerialPort serial_;
   Um982Parser parser_;
-  std::string rx_buffer_;
+  UnicoreTransport transport_;
+  UnicoreBinaryDispatcher binary_dispatcher_;
   std::optional<SteadyTime> last_open_attempt_;
 
   std::optional<TimedData<FixData>> latest_gga_fix_;
@@ -1841,6 +1926,8 @@ private:
   std::optional<TimedData<FreqJamStatusData>> latest_freq_jam_status_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
+  std::optional<SteadyTime> last_binary_frame_time_;
+  std::optional<uint16_t> last_binary_msg_id_;
 
   std::unordered_map<std::string, std::size_t> sentence_counts_;
   std::unordered_map<std::string, TimedData<int>> gsv_counts_;
@@ -1852,6 +1939,8 @@ private:
   std::deque<std::chrono::steady_clock::time_point> rtcm_history_;
   std::deque<int> recent_rtcm_message_ids_;
   ParserCounters parser_counters_snapshot_{};
+  UnicoreBinaryTransportCounters binary_counters_snapshot_{};
+  std::size_t binary_unknown_frames_snapshot_{0U};
 
   rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr fix_pub_;
   rclcpp::Publisher<compass_msgs::msg::Azimuth>::SharedPtr heading_pub_;
