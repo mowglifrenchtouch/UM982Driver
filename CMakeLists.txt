@@ -18,6 +18,7 @@ find_package(rtcm_msgs REQUIRED)
 
 add_library(${PROJECT_NAME}_core STATIC
   src/serial_port.cpp
+  src/unicore_binary_nav.cpp
   src/unicore_transport.cpp
   src/um982_parser.cpp
 )
@@ -88,6 +89,13 @@ if(BUILD_TESTING)
     test/test_unicore_transport.cpp
   )
   target_link_libraries(test_unicore_transport
+    ${PROJECT_NAME}_core
+  )
+
+  ament_add_gtest(test_unicore_binary_nav
+    test/test_unicore_binary_nav.cpp
+  )
+  target_link_libraries(test_unicore_binary_nav
     ${PROJECT_NAME}_core
   )
 endif()

@@ -19,12 +19,14 @@ enum class FixSource : uint8_t
 {
   kGga,
   kPvtslna,
+  kPvtslnb,
 };
 
 enum class HeadingSource : uint8_t
 {
   kHdt,
   kHpr,
+  kPvtslnb,
 };
 
 struct FixData
@@ -47,6 +49,7 @@ struct HeadingData
   double heading_deg{0.0};
   std::optional<double> pitch_deg;
   std::optional<double> roll_deg;
+  std::optional<double> baseline_m;
   double variance_deg2{0.0};
 };
 

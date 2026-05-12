@@ -25,3 +25,6 @@ um982_node:
     binary_parser_strict_crc: true
     binary_max_frame_size: 4096
     binary_debug_unknown_ids: false
+    use_binary_nav: false
+    binary_compare_ascii: true
+    binary_nav_timeout_sec: 2.0

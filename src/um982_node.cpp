@@ -23,6 +23,7 @@
 #include <sensor_msgs/msg/nav_sat_status.hpp>
 
 #include "mowgli_unicore_gnss/diagnostic_state.hpp"
+#include "mowgli_unicore_gnss/unicore_binary_nav.hpp"
 #include "mowgli_unicore_gnss/serial_port.hpp"
 #include "mowgli_unicore_gnss/unicore_transport.hpp"
 #include "mowgli_unicore_gnss/um982_parser.hpp"
@@ -83,6 +84,8 @@ std::string fix_source_name(FixSource source)
       return "GGA";
     case FixSource::kPvtslna:
       return "PVTSLNA";
+    case FixSource::kPvtslnb:
+      return "PVTSLNB";
   }
   return "unknown";
 }
@@ -95,8 +98,32 @@ std::string heading_source_name(HeadingSource source)
       return "HDT";
     case HeadingSource::kHpr:
       return "HPR";
+    case HeadingSource::kPvtslnb:
+      return "PVTSLNB";
   }
   return "unknown";
+}
+
+double horizontal_position_delta_m(const FixData& lhs, const FixData& rhs)
+{
+  constexpr double kEarthRadiusM = 6378137.0;
+  constexpr double kDegToRad = M_PI / 180.0;
+
+  const double avg_lat_rad = ((lhs.latitude_deg + rhs.latitude_deg) * 0.5) * kDegToRad;
+  const double d_lat = (rhs.latitude_deg - lhs.latitude_deg) * kDegToRad;
+  const double d_lon = (rhs.longitude_deg - lhs.longitude_deg) * kDegToRad;
+  const double north = d_lat * kEarthRadiusM;
+  const double east = d_lon * kEarthRadiusM * std::cos(avg_lat_rad);
+  return std::sqrt((north * north) + (east * east));
+}
+
+std::optional<double> covariance_stddev(const FixData& fix, std::size_t index)
+{
+  if (!fix.has_covariance || index >= fix.covariance.size() || fix.covariance[index] < 0.0)
+  {
+    return std::nullopt;
+  }
+  return std::sqrt(fix.covariance[index]);
 }
 
 const char* fix_type_from_quality(int quality)
@@ -501,6 +528,9 @@ public:
     binary_max_frame_size_ =
         static_cast<std::size_t>(std::max(256, declare_parameter<int>("binary_max_frame_size", 4096)));
     binary_debug_unknown_ids_ = declare_parameter<bool>("binary_debug_unknown_ids", false);
+    use_binary_nav_ = declare_parameter<bool>("use_binary_nav", false);
+    binary_compare_ascii_ = declare_parameter<bool>("binary_compare_ascii", true);
+    binary_nav_timeout_sec_ = declare_parameter<double>("binary_nav_timeout_sec", 2.0);
     transport_.set_options(
         {enable_unicore_binary_, binary_parser_strict_crc_, binary_max_frame_size_});
 
@@ -527,7 +557,8 @@ public:
     RCLCPP_INFO(get_logger(),
                 "UM982 node configured: port=%s baudrate=%d fix_topic=%s heading_topic=%s "
                 "rtcm_timeout=%.1fs max_diff_age=%.1fs sat_diag_timeout=%.1fs rf_diag_timeout=%.1fs "
-                "binary=%s strict_crc=%s binary_max_frame=%zu",
+                "binary=%s strict_crc=%s binary_max_frame=%zu use_binary_nav=%s compare_ascii=%s "
+                "binary_nav_timeout=%.1fs",
                 port_.c_str(),
                 baudrate_,
                 fix_topic_.c_str(),
@@ -538,7 +569,10 @@ public:
                 rf_diag_timeout_sec_,
                 enable_unicore_binary_ ? "true" : "false",
                 binary_parser_strict_crc_ ? "true" : "false",
-                binary_max_frame_size_);
+                binary_max_frame_size_,
+                use_binary_nav_ ? "true" : "false",
+                binary_compare_ascii_ ? "true" : "false",
+                binary_nav_timeout_sec_);
   }
 
 private:
@@ -765,6 +799,40 @@ private:
                            static_cast<unsigned int>(frame.message_id),
                            frame.payload.size());
     }
+
+    const auto parsed = binary_nav_parser_.parse(frame);
+    if (!parsed.has_value())
+    {
+      return;
+    }
+
+    if (parsed->fix.has_value())
+    {
+      latest_binary_pvtsln_fix_ = TimedData<FixData>{*parsed->fix, received_at};
+      if (use_binary_nav_)
+      {
+        publish_active_fix();
+      }
+    }
+
+    if (parsed->heading.has_value())
+    {
+      latest_binary_heading_ = TimedData<HeadingData>{*parsed->heading, received_at};
+      if (use_binary_nav_)
+      {
+        publish_active_heading();
+      }
+    }
+
+    if (parsed->velocity.has_value())
+    {
+      latest_binary_velocity_ = TimedData<VelocityData>{*parsed->velocity, received_at};
+    }
+
+    if (parsed->bestnav.has_value())
+    {
+      latest_binary_bestnav_ = TimedData<BestNavData>{*parsed->bestnav, received_at};
+    }
   }
 
   bool is_fresh(const SteadyTime& stamp) const
@@ -783,7 +851,7 @@ private:
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - stamp).count();
   }
 
-  std::optional<BestNavData> active_bestnav() const
+  std::optional<BestNavData> active_ascii_bestnav() const
   {
     if (latest_bestnav_.has_value() &&
         is_fresh(latest_bestnav_->received_at, std::max(2.0, rtcm_timeout_sec_)))
@@ -791,6 +859,28 @@ private:
       return latest_bestnav_->data;
     }
     return std::nullopt;
+  }
+
+  std::optional<BestNavData> active_binary_bestnav() const
+  {
+    if (latest_binary_bestnav_.has_value() &&
+        is_fresh(latest_binary_bestnav_->received_at, binary_nav_timeout_sec_))
+    {
+      return latest_binary_bestnav_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<BestNavData> active_bestnav() const
+  {
+    if (use_binary_nav_)
+    {
+      if (const auto binary = active_binary_bestnav(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_bestnav();
   }
 
   std::optional<RtkStatusData> active_rtk_status() const
@@ -872,7 +962,7 @@ private:
     return std::nullopt;
   }
 
-  std::optional<FixData> active_fix() const
+  std::optional<FixData> active_ascii_fix() const
   {
     // Keep NavSatFix publication tied to the validated position streams
     // from PR1: PVTSLNA first, then GGA as a fallback.
@@ -889,7 +979,62 @@ private:
     return std::nullopt;
   }
 
-  std::optional<HeadingData> active_heading() const
+  std::optional<FixData> active_binary_fix() const
+  {
+    if (latest_binary_pvtsln_fix_.has_value() && latest_binary_pvtsln_fix_->data.valid_fix &&
+        is_fresh(latest_binary_pvtsln_fix_->received_at, binary_nav_timeout_sec_))
+    {
+      return latest_binary_pvtsln_fix_->data;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<FixData> active_binary_fix_for_comparison() const
+  {
+    if (const auto fix = active_binary_fix(); fix.has_value())
+    {
+      return fix;
+    }
+
+    const auto bestnav = active_binary_bestnav();
+    if (!bestnav.has_value())
+    {
+      return std::nullopt;
+    }
+
+    FixData fix;
+    fix.source = FixSource::kPvtslnb;
+    fix.valid_fix = bestnav->fix_quality > 0;
+    fix.latitude_deg = bestnav->latitude_deg;
+    fix.longitude_deg = bestnav->longitude_deg;
+    fix.altitude_m = bestnav->height_msl_m + bestnav->undulation_m;
+    fix.fix_quality = bestnav->fix_quality;
+    fix.satellites = bestnav->satellites_used;
+    fix.has_covariance = bestnav->latitude_std_m >= 0.0 && bestnav->longitude_std_m >= 0.0 &&
+                         bestnav->height_std_m >= 0.0;
+    if (fix.has_covariance)
+    {
+      fix.covariance.fill(0.0);
+      fix.covariance[0] = bestnav->longitude_std_m * bestnav->longitude_std_m;
+      fix.covariance[4] = bestnav->latitude_std_m * bestnav->latitude_std_m;
+      fix.covariance[8] = bestnav->height_std_m * bestnav->height_std_m;
+    }
+    return fix;
+  }
+
+  std::optional<FixData> active_fix() const
+  {
+    if (use_binary_nav_)
+    {
+      if (const auto binary = active_binary_fix(); binary.has_value())
+      {
+        return binary;
+      }
+    }
+    return active_ascii_fix();
+  }
+
+  std::optional<HeadingData> active_ascii_heading() const
   {
     if (latest_hpr_heading_.has_value() && is_fresh(latest_hpr_heading_->received_at))
     {
@@ -900,6 +1045,16 @@ private:
       return latest_hdt_heading_->data;
     }
     return std::nullopt;
+  }
+
+  std::optional<HeadingData> active_heading() const
+  {
+    if (use_binary_nav_ && latest_binary_heading_.has_value() &&
+        is_fresh(latest_binary_heading_->received_at, binary_nav_timeout_sec_))
+    {
+      return latest_binary_heading_->data;
+    }
+    return active_ascii_heading();
   }
 
   sensor_msgs::msg::NavSatStatus build_nav_status(const FixData& fix) const
@@ -1000,10 +1155,20 @@ private:
     s.hardware_id = "unicore_um982";
 
     const auto bestnav = active_bestnav();
+    const auto ascii_fix = active_ascii_fix();
+    const auto binary_pvtsln = active_binary_fix();
+    const auto binary_fix = active_binary_fix_for_comparison();
+    const auto binary_bestnav = active_binary_bestnav();
     const int raw_quality = fix.has_value() ? fix->fix_quality : 0;
     const int q = raw_quality > 0 ? raw_quality : (bestnav.has_value() ? bestnav->fix_quality : 0);
     const char* carr_soln = carrier_solution_from_quality(q);
     const char* fix_type = fix_type_from_quality(q);
+    const double binary_nav_age =
+        latest_binary_pvtsln_fix_.has_value()
+            ? age_seconds(latest_binary_pvtsln_fix_->received_at)
+            : (latest_binary_bestnav_.has_value()
+                   ? age_seconds(latest_binary_bestnav_->received_at)
+                   : std::numeric_limits<double>::infinity());
 
     double sigma_xy_mm = -1.0;
     if (fix.has_value() && fix->has_covariance)
@@ -1018,6 +1183,13 @@ private:
     s.values.push_back(kv("gps_fix_ok", q > 0 ? "True" : "False"));
     s.values.push_back(kv("diff_corr", q >= 2 ? "True" : "False"));
     s.values.push_back(kv("fix_quality", std::to_string(q)));
+    s.values.push_back(kv("use_binary_nav", use_binary_nav_ ? "True" : "False"));
+    s.values.push_back(kv("binary_compare_ascii", binary_compare_ascii_ ? "True" : "False"));
+    s.values.push_back(kv("binary_bestnav_available", binary_bestnav.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_pvtsln_available", binary_pvtsln.has_value() ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_nav_age_s",
+           std::isfinite(binary_nav_age) ? to_string_or_nan(binary_nav_age) : "inf"));
     s.values.push_back(kv("sigma_xy_mm",
                           sigma_xy_mm >= 0.0 ? to_string_or_nan(sigma_xy_mm) : "n/a"));
     if (fix.has_value())
@@ -1039,6 +1211,81 @@ private:
           kv("ext_solution_status", to_hex_byte(bestnav->extended_solution_status)));
       s.values.push_back(kv("ext_solution_detail",
                             describe_ext_solution_status(bestnav->extended_solution_status)));
+    }
+
+    if (binary_compare_ascii_)
+    {
+      if (ascii_fix.has_value() && binary_fix.has_value())
+      {
+        const double altitude_delta_m = std::fabs(binary_fix->altitude_m - ascii_fix->altitude_m);
+        s.values.push_back(kv("binary_ascii_position_delta_m",
+                              to_string_or_nan(horizontal_position_delta_m(*ascii_fix, *binary_fix))));
+        s.values.push_back(
+            kv("binary_ascii_altitude_delta_m", to_string_or_nan(altitude_delta_m)));
+        s.values.push_back(kv("binary_ascii_latitude_delta_deg",
+                              to_string_or_nan(binary_fix->latitude_deg - ascii_fix->latitude_deg)));
+        s.values.push_back(
+            kv("binary_ascii_longitude_delta_deg",
+               to_string_or_nan(binary_fix->longitude_deg - ascii_fix->longitude_deg)));
+
+        const auto ascii_lon_std = covariance_stddev(*ascii_fix, 0U);
+        const auto ascii_lat_std = covariance_stddev(*ascii_fix, 4U);
+        const auto ascii_alt_std = covariance_stddev(*ascii_fix, 8U);
+        const auto binary_lon_std = covariance_stddev(*binary_fix, 0U);
+        const auto binary_lat_std = covariance_stddev(*binary_fix, 4U);
+        const auto binary_alt_std = covariance_stddev(*binary_fix, 8U);
+
+        s.values.push_back(kv(
+            "binary_ascii_lon_std_delta_m",
+            ascii_lon_std.has_value() && binary_lon_std.has_value()
+                ? to_string_or_nan(std::fabs(*binary_lon_std - *ascii_lon_std))
+                : "n/a"));
+        s.values.push_back(kv(
+            "binary_ascii_lat_std_delta_m",
+            ascii_lat_std.has_value() && binary_lat_std.has_value()
+                ? to_string_or_nan(std::fabs(*binary_lat_std - *ascii_lat_std))
+                : "n/a"));
+        s.values.push_back(kv(
+            "binary_ascii_alt_std_delta_m",
+            ascii_alt_std.has_value() && binary_alt_std.has_value()
+                ? to_string_or_nan(std::fabs(*binary_alt_std - *ascii_alt_std))
+                : "n/a"));
+      }
+      else
+      {
+        s.values.push_back(kv("binary_ascii_position_delta_m", "n/a"));
+        s.values.push_back(kv("binary_ascii_altitude_delta_m", "n/a"));
+        s.values.push_back(kv("binary_ascii_latitude_delta_deg", "n/a"));
+        s.values.push_back(kv("binary_ascii_longitude_delta_deg", "n/a"));
+        s.values.push_back(kv("binary_ascii_lon_std_delta_m", "n/a"));
+        s.values.push_back(kv("binary_ascii_lat_std_delta_m", "n/a"));
+        s.values.push_back(kv("binary_ascii_alt_std_delta_m", "n/a"));
+      }
+
+      int ascii_quality = 0;
+      if (ascii_fix.has_value() && ascii_fix->fix_quality > 0)
+      {
+        ascii_quality = ascii_fix->fix_quality;
+      }
+      else if (const auto ascii_bestnav = active_ascii_bestnav(); ascii_bestnav.has_value())
+      {
+        ascii_quality = ascii_bestnav->fix_quality;
+      }
+
+      int binary_quality = 0;
+      if (binary_fix.has_value() && binary_fix->fix_quality > 0)
+      {
+        binary_quality = binary_fix->fix_quality;
+      }
+      else if (binary_bestnav.has_value())
+      {
+        binary_quality = binary_bestnav->fix_quality;
+      }
+
+      s.values.push_back(kv("binary_ascii_fix_type_match",
+                            (ascii_quality > 0 && binary_quality > 0)
+                                ? (ascii_quality == binary_quality ? "True" : "False")
+                                : "n/a"));
     }
 
     if (!serial_.is_open())
@@ -1269,9 +1516,20 @@ private:
     }
 
     const auto bestnav = active_bestnav();
+    const auto binary_bestnav = active_binary_bestnav();
+    const auto binary_fix = active_binary_fix();
     const auto rtk_status = active_rtk_status();
-    const double bestnav_age = latest_bestnav_.has_value() ? age_seconds(latest_bestnav_->received_at)
-                                                           : std::numeric_limits<double>::infinity();
+    const double bestnav_age =
+        use_binary_nav_ && latest_binary_bestnav_.has_value()
+            ? age_seconds(latest_binary_bestnav_->received_at)
+            : (latest_bestnav_.has_value() ? age_seconds(latest_bestnav_->received_at)
+                                           : std::numeric_limits<double>::infinity());
+    const double binary_nav_age =
+        latest_binary_pvtsln_fix_.has_value()
+            ? age_seconds(latest_binary_pvtsln_fix_->received_at)
+            : (latest_binary_bestnav_.has_value()
+                   ? age_seconds(latest_binary_bestnav_->received_at)
+                   : std::numeric_limits<double>::infinity());
     const double rtkstatus_age =
         last_rtkstatus_time_.has_value() ? age_seconds(*last_rtkstatus_time_)
                                          : std::numeric_limits<double>::infinity();
@@ -1285,6 +1543,13 @@ private:
     s.values.push_back(kv("rtkstatus_state", diagnostic_feed_state_name(
                                                 diagnostic_feed_state(true, rtk_status.has_value()))));
     s.values.push_back(kv("status_enabled", "True"));
+    s.values.push_back(kv("binary_bestnav_available", binary_bestnav.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_pvtsln_available", binary_fix.has_value() ? "True" : "False"));
+    s.values.push_back(kv("binary_nav_enabled", enable_unicore_binary_ ? "True" : "False"));
+    s.values.push_back(kv("use_binary_nav", use_binary_nav_ ? "True" : "False"));
+    s.values.push_back(
+        kv("binary_nav_age_s",
+           std::isfinite(binary_nav_age) ? to_string_or_nan(binary_nav_age) : "inf"));
     s.values.push_back(
         kv("last_bestnav_age_s", std::isfinite(bestnav_age) ? to_string_or_nan(bestnav_age) : "inf"));
     s.values.push_back(kv("last_rtkstatus_age_s",
@@ -1350,7 +1615,7 @@ private:
     if (!bestnav.has_value())
     {
       s.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      s.message = "BESTNAVA stale or missing";
+      s.message = use_binary_nav_ ? "BESTNAVB stale or missing" : "BESTNAVA stale or missing";
     }
     else if (!rtk_status.has_value())
     {
@@ -1899,6 +2164,9 @@ private:
   bool binary_parser_strict_crc_{true};
   std::size_t binary_max_frame_size_{4096U};
   bool binary_debug_unknown_ids_{false};
+  bool use_binary_nav_{false};
+  bool binary_compare_ascii_{true};
+  double binary_nav_timeout_sec_{2.0};
   std::string fix_topic_;
   std::string heading_topic_;
   std::string diagnostics_topic_;
@@ -1906,6 +2174,7 @@ private:
 
   SerialPort serial_;
   Um982Parser parser_;
+  UnicoreBinaryNavParser binary_nav_parser_;
   UnicoreTransport transport_;
   UnicoreBinaryDispatcher binary_dispatcher_;
   std::optional<SteadyTime> last_open_attempt_;
@@ -1924,6 +2193,10 @@ private:
   std::optional<TimedData<HwStatusData>> latest_hw_status_;
   std::optional<TimedData<JamStatusData>> latest_jam_status_;
   std::optional<TimedData<FreqJamStatusData>> latest_freq_jam_status_;
+  std::optional<TimedData<FixData>> latest_binary_pvtsln_fix_;
+  std::optional<TimedData<HeadingData>> latest_binary_heading_;
+  std::optional<TimedData<VelocityData>> latest_binary_velocity_;
+  std::optional<TimedData<BestNavData>> latest_binary_bestnav_;
   std::optional<SteadyTime> last_rtkstatus_time_;
   std::optional<SteadyTime> last_rtcmstatus_time_;
   std::optional<SteadyTime> last_binary_frame_time_;
